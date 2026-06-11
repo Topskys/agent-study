@@ -1,0 +1,15 @@
+[project]
+name = "simple-agent"
+version = "0.1.0"
+description = "A simple LLM-based agent"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+simple-agent = "main:main"
+
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
