@@ -9,7 +9,7 @@ import time
 import uuid
 
 import requests
-from rag.datatypes import Chunk, RAGResult
+from rag.datatypes import Chunk, SearchResult, RAGResult
 from .base import BaseGenerator
 from .context_builder import ContextBuilder
 from .citation import CitationTracker
@@ -32,11 +32,13 @@ class GenerationPipeline:
     def generate(
         self,
         query: str,
-        chunks: list[Chunk],
+        chunks: list[Chunk | SearchResult],
         **kwargs,
     ) -> RAGResult:
         t_start = time.time()
         request_id = kwargs.pop("request_id", uuid.uuid4().hex[:12])
+
+        unwrapped = [r.chunk if isinstance(r, SearchResult) else r for r in chunks]
 
         if not self.generator:
             return RAGResult(
@@ -47,13 +49,13 @@ class GenerationPipeline:
                 latency_ms=(time.time() - t_start) * 1000,
             )
 
-        context = self.context_builder.build(chunks, query)
+        context = self.context_builder.build(unwrapped, query)
         answer = self.generator.generate(query, context, **kwargs)
         latency_ms = (time.time() - t_start) * 1000
 
         return self.citation_tracker.build_result(
             answer=answer,
-            chunks=chunks,
+            chunks=unwrapped,
             confidence=kwargs.get("confidence", 0.8),
             request_id=request_id,
             latency_ms=latency_ms,
@@ -62,14 +64,15 @@ class GenerationPipeline:
     def generate_stream(
         self,
         query: str,
-        chunks: list[Chunk],
+        chunks: list[Chunk | SearchResult],
         **kwargs,
     ):
         if not isinstance(self.generator, RAGGenerator):
             yield RAGResult(answer="Streaming requires RAGGenerator")
             return
 
-        context = self.context_builder.build(chunks, query)
+        unwrapped = [r.chunk if isinstance(r, SearchResult) else r for r in chunks]
+        context = self.context_builder.build(unwrapped, query)
         messages = self.generator._build_messages(query, context)
         payload = {
             "model": self.generator._model,
@@ -103,7 +106,7 @@ class GenerationPipeline:
                             full_text += delta
                             yield self.citation_tracker.build_result(
                                 answer=full_text,
-                                chunks=chunks,
+                                chunks=unwrapped,
                                 confidence=0.8,
                             )
                     except json.JSONDecodeError:

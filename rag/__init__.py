@@ -1,4 +1,5 @@
 from .basic_rag import BasicRAG
+from .rag_system import RAGSystem
 from .datatypes import RawDocument, Chunk, SearchResult, RAGResult, LogEntry
 from .loader import (
     BaseLoader,
@@ -35,6 +36,7 @@ from .generate import (
 
 __all__ = [
     "BasicRAG",
+    "RAGSystem",
     "RawDocument",
     "Chunk",
     "SearchResult",
