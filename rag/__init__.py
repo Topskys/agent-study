@@ -18,6 +18,20 @@ from .chunker import (
 from .embed import BaseEmbedder, ApiEmbedder, LocalEmbedder, EmbedRouter
 from .store import BaseVectorStore, MemoryStore, MilvusStore, ChromaStore, BM25Index
 from .ingest import DocumentIndexer
+from .retrieve import (
+    BaseRetriever,
+    QueryRewriter,
+    HybridRetriever,
+    Reranker,
+    RetrievalPipeline,
+)
+from .generate import (
+    BaseGenerator,
+    ContextBuilder,
+    RAGGenerator,
+    CitationTracker,
+    GenerationPipeline,
+)
 
 __all__ = [
     "BasicRAG",
@@ -47,4 +61,14 @@ __all__ = [
     "ChromaStore",
     "BM25Index",
     "DocumentIndexer",
+    "BaseRetriever",
+    "QueryRewriter",
+    "HybridRetriever",
+    "Reranker",
+    "RetrievalPipeline",
+    "BaseGenerator",
+    "ContextBuilder",
+    "RAGGenerator",
+    "CitationTracker",
+    "GenerationPipeline",
 ]
