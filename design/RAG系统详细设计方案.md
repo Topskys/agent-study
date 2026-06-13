@@ -1,42 +1,80 @@
 # RAG 系统设计方案
 
-> **当前阶段：P0（基础流程）** — 单文件极简实现，跑通索引→检索→生成全流程
-> 完整模块化设计见文末「后续规划」章节，P1/P2 阶段逐步落地
+> **模块化 RAG 系统** — 面向 Agent 的内置知识库模块，支持索引→检索→生成全流程
+> 实现路线：P0 基础流程 → P1 效果优化 → P2 生产化
 
 ---
 
-## 当前目录结构
+## 实现进度
+
+| 阶段 | 状态 | 内容 |
+|------|------|------|
+| **P0** | ✅ 已完成 | 单文件 BasicRAG，.txt/.md，API Embedding，内存向量 + numpy 检索，LLM 生成，Agent 工具集成 |
+| **P1** | 📋 待实现 | 本地嵌入模型、BM25+稠密混合检索、重排序、PDF/DOCX/HTML 加载、Self-RAG |
+| **P2** | 📋 待实现 | Milvus/Chroma 持久化、全链路日志、数据飞轮、配置中心、视频加载、生产化部署 |
+
+---
+
+## 类图
+
+完整 UML 类图见：`design/RAG系统类图.puml`（PlantUML 格式）
+
+包含 12 个 package、5 个抽象接口、20+ 个类，覆盖：
+- **数据类型**：RawDocument / Chunk / SearchResult / RAGResult / LogEntry
+- **核心系统**：RAGSystem / ConfigLoader / PipelineLogger
+- **索引管线**：LoaderFactory + 5 种加载器 / ChunkerFactory + 3 种分块器 / MetadataExtractor
+- **嵌入层**：LocalEmbedder / ApiEmbedder / EmbedRouter（混合路由 + fallback）
+- **向量存储**：MilvusStore / ChromaStore / BM25Index
+- **检索管线**：QueryRewriter / HybridRetriever / Reranker / SelfRAG / CorrectiveRAG / MultiRoundRetriever
+- **生成管线**：ContextBuilder / RAGGenerator / CitationTracker
+- **数据飞轮**：DataFlywheel
+
+---
+
+## 架构总览
+
+```
+用户/Agent
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────┐
+│                      RAGSystem (总入口)                       │
+│  query() / index_document() / batch_index() / clear_index()  │
+└──────┬─────────────────────┬─────────────────────┬───────────┘
+       │                     │                     │
+       ▼                     ▼                     ▼
+┌──────────────┐   ┌──────────────────┐   ┌──────────────────┐
+│  索引管线     │   │   检索管线         │   │   生成管线         │
+│ DocumentIndex│   │ RetrievalPipeline│   │ GenerationPipelin│
+│              │   │                  │   │                  │
+│ 加载→分块    │   │ 改写→混合检索→    │   │ 上下文组装→LLM→  │
+│ →嵌入→存储   │   │ 重排→Self-RAG→   │   │ 引用解析→置信度   │
+│              │   │ CRAG→多轮迭代     │   │                  │
+└──────────────┘   └──────────────────┘   └──────────────────┘
+```
+
+## P0 当前实现
+
+P0 为单文件极简实现 `rag/basic_rag.py`（~180行），已验证端到端跑通：
 
 ```
 rag/
 ├── __init__.py                  # 导出 BasicRAG
-├── basic_rag.py                 # 极简 RAG 单文件实现（~180行）
-└── index_data.pkl               # 索引持久化文件（运行时自动生成）
+├── basic_rag.py                 # 极简 RAG 单文件实现
+├── .env / .env.example          # 配置
+├── index_data.pkl               # 索引持久化（运行时生成）
+├── assets/                      # 测试文档
+└── examples/                    # 使用示例
+    ├── 01_basic_rag.py
+    ├── 02_batch_index.py
+    └── 03_查看索引.py
 ```
 
-## 当前实现架构
-
-```
-用户查询 → API Embedding → 余弦相似度检索 → 上下文组装 → LLM 生成 → 带引用回答
-                ↑                              ↑
-            API 向量化                      LLM 调用
-        (text-embedding-ada-002)         (复用 Agent 的 LLM 配置)
-
-文档索引：
-.txt/.md 文件 → 递归分块 → API 向量化 → 内存存储 → pickle 持久化
-```
-
-## 三阶段路线图
-
-| 阶段 | 目标 | 内容 |
-|------|------|------|
-| **P0（当前）** | 跑通基础流程 | 单文件 BasicRAG，.txt/.md，API Embedding，内存存储，LLM 生成 |
-| P1 | 效果优化 | 本地嵌入模型、BM25+稠密混合检索、重排序、PDF/DOCX/HTML 加载 |
-| P2 | 生产化 | Milvus/Chroma 持久化、全链路日志、数据飞轮、配置中心、视频加载 |
+使用示例见 [P0 快速开始](#p0-快速开始)。
 
 ---
 
-## 使用示例
+## P0 快速开始
 
 ### 1. 配置环境变量
 
@@ -53,7 +91,7 @@ LLM_MODEL=gpt-4o-mini
 ### 2. 运行示例脚本
 
 ```bash
-# 基础索引与检索（从项目根目录运行）
+# 基础索引与检索
 python rag/examples/01_basic_rag.py
 
 # 批量索引目录 + 交互查询
@@ -69,15 +107,8 @@ rag = BasicRAG(
     api_key="sk-xxx",
     base_url="https://api.openai.com/v1/chat/completions",
 )
-
-# 索引
 rag.index_text("RAG 是检索增强生成技术。")
 rag.index_file("文档.md")
-
-# 检索（仅检索，不生成）
-results = rag.search("什么是 RAG？", top_k=3)
-
-# 检索 + 生成
 result = rag.query("什么是 RAG？")
 print(result["answer"])
 ```
@@ -89,26 +120,13 @@ print(result["answer"])
 
 输出:
 回答: RAG（Retrieval-Augmented Generation）是一种检索增强生成技术。
-它通过先检索知识库中的相关文档，再将检索结果作为上下文提供给
-大语言模型，从而生成更准确、更有依据的回答。
-
 置信度: 0.92
 来源: ['测试文档.md']
 ```
 
 ---
 
-> 以下为 P1/P2 完整设计方案，供后续迭代参考。
-
----
-
----
-
-## 附：完整设计方案（P1/P2 参考）
-
-> 以下为 P1/P2 阶段完整模块化设计方案，当前 P0 阶段尚未实现。
-
-### 一、统一数据类型 (types.py)
+## 一、统一数据类型 (types.py)
 
 所有模块共享的数据结构，定义在 `rag/types.py`：
 
@@ -1266,7 +1284,7 @@ class RAGSystem:
 
 ## 九、Agent 集成方式
 
-### 5.1 工具注册
+### 9.1 工具注册
 
 ```python
 # RAG 模块初始化（在 Agent 启动时完成）
@@ -1313,223 +1331,11 @@ Agent 收到用户问题
 
 ### 9.3 与记忆模块的关系
 
-```
----
-
-## RAG 系统类图
-
-```mermaid
-classDiagram
-    class RawDocument {
-        <<dataclass>>
-        +str content
-        +str source
-        +dict metadata
-    }
-    class Chunk {
-        <<dataclass>>
-        +str chunk_id
-        +str text
-        +dict metadata
-        +dict embeddings
-        +str parent_id
-    }
-    class SearchResult {
-        <<dataclass>>
-        +Chunk chunk
-        +float score
-        +int rank
-    }
-    class RAGResult {
-        <<dataclass>>
-        +str answer
-        +list sources
-        +float confidence
-        +str request_id
-        +float latency_ms
-    }
-
-    class RAGSystem {
-        +query() dict
-        +index_document() int
-        +batch_index() dict
-    }
-    class ConfigLoader {
-        +load() dict
-        +get(*keys) any
-    }
-    class PipelineLogger {
-        +new_request() str
-        +log_retrieval()
-        +log_generation()
-        +save()
-    }
-
-    class DocumentIndexer {
-        +index_document() int
-    }
-    class BaseLoader {
-        <<abstract>>
-        +load(file_path) list[RawDocument]
-    }
-    class TextLoader
-    class DocxLoader
-    class PdfLoader
-    class VideoLoader
-    class LoaderFactory {
-        +get_loader(path) BaseLoader
-    }
-
-    class BaseChunker {
-        <<abstract>>
-        +chunk(RawDocument) list[Chunk]
-    }
-    class RecursiveChunker
-    class SemanticChunker
-    class ParentChildChunker
-    class ChunkerFactory {
-        +get_chunker(strategy) BaseChunker
-    }
-
-    class BaseEmbedder {
-        <<abstract>>
-        +embed(texts) list[vector]
-        +dim int
-        +name str
-    }
-    class LocalEmbedder
-    class ApiEmbedder
-    class EmbedRouter {
-        +embed(texts, mode) list[vector]
-    }
-
-    class BaseVectorStore {
-        <<abstract>>
-        +create_collection()
-        +insert()
-        +search() list[SearchResult]
-        +delete()
-    }
-    class MilvusStore
-    class ChromaStore
-    class BM25Index {
-        +add_documents()
-        +search() list[SearchResult]
-    }
-
-    class RetrievalPipeline {
-        +retrieve() list[SearchResult]
-    }
-    class QueryRewriter {
-        +rewrite() str
-        +expand_query() list[str]
-        +hyde() str
-    }
-    class HybridRetriever {
-        +retrieve() list[SearchResult]
-    }
-    class Reranker {
-        +rerank() list[SearchResult]
-    }
-    class SelfRAG {
-        +need_retrieve() bool
-        +filter_relevant() list[SearchResult]
-        +judge_support() str
-    }
-    class CorrectiveRAG {
-        +supplement_if_needed()
-    }
-    class MultiRoundRetriever {
-        +iterate()
-    }
-
-    class GenerationPipeline {
-        +generate() RAGResult
-    }
-    class ContextBuilder {
-        +build() str
-    }
-    class RAGGenerator {
-        +generate() str
-        +evaluate_confidence() float
-    }
-    class CitationTracker {
-        +parse() (str, list[dict])
-    }
-
-    class DataFlywheel {
-        +record_query()
-        +process_feedback()
-    }
-
-    %% Inheritance
-    BaseLoader <|-- TextLoader
-    BaseLoader <|-- DocxLoader
-    BaseLoader <|-- PdfLoader
-    BaseLoader <|-- VideoLoader
-    BaseChunker <|-- RecursiveChunker
-    BaseChunker <|-- SemanticChunker
-    BaseChunker <|-- ParentChildChunker
-    BaseEmbedder <|-- LocalEmbedder
-    BaseEmbedder <|-- ApiEmbedder
-    BaseVectorStore <|-- MilvusStore
-    BaseVectorStore <|-- ChromaStore
-
-    %% Composition (RAGSystem owns)
-    RAGSystem *-- ConfigLoader
-    RAGSystem *-- PipelineLogger
-    RAGSystem *-- DocumentIndexer
-    RAGSystem *-- RetrievalPipeline
-    RAGSystem *-- GenerationPipeline
-    RAGSystem *-- EmbedRouter
-    RAGSystem *-- BaseVectorStore
-    RAGSystem *-- BM25Index
-
-    %% Composition (DocumentIndexer owns)
-    DocumentIndexer *-- LoaderFactory
-    DocumentIndexer *-- ChunkerFactory
-    DocumentIndexer *-- EmbedRouter
-    DocumentIndexer *-- BaseVectorStore
-    DocumentIndexer *-- BM25Index
-
-    %% Composition (RetrievalPipeline owns)
-    RetrievalPipeline *-- QueryRewriter
-    RetrievalPipeline *-- HybridRetriever
-    RetrievalPipeline *-- Reranker
-    RetrievalPipeline *-- SelfRAG
-    RetrievalPipeline *-- CorrectiveRAG
-    RetrievalPipeline *-- MultiRoundRetriever
-
-    %% Composition (GenerationPipeline owns)
-    GenerationPipeline *-- ContextBuilder
-    GenerationPipeline *-- RAGGenerator
-    GenerationPipeline *-- CitationTracker
-    GenerationPipeline *-- SelfRAG
-
-    %% Factory creates
-    LoaderFactory --> BaseLoader : creates
-    ChunkerFactory --> BaseChunker : creates
-
-    %% Uses
-    EmbedRouter --> BaseEmbedder : routes to
-    HybridRetriever --> EmbedRouter : uses
-    HybridRetriever --> BaseVectorStore : uses
-    HybridRetriever --> BM25Index : uses
-
-    %% Returns
-    BaseLoader --> RawDocument : returns
-    BaseChunker --> Chunk : returns
-    BaseVectorStore --> SearchResult : returns
-    GenerationPipeline --> RAGResult : returns
-    SearchResult --> Chunk : references
-```
-
 RAG 检索结果 → 同时写入 memory/long_term
   ├─ 用于后续同类问题的快速响应（缓存命中）
   └─ 作为长期记忆，供 Agent 跨会话复用
 
 记忆模块 → 为 RAG 提供用户偏好（结果格式、详细程度、top_k 偏好）
-```
 
 ### 9.4 与索引工具的集成
 
@@ -1557,7 +1363,7 @@ agent.register_tool(
 
 ## 十、数据飞轮与可观测性
 
-### 6.1 数据飞轮 (feedback/flywheel.py)
+### 10.1 数据飞轮 (feedback/flywheel.py)
 
 ```python
 class DataFlywheel:
@@ -1594,7 +1400,7 @@ class DataFlywheel:
     """
 ```
 
-### 6.2 全链路可观测性
+### 10.2 全链路可观测性
 
 每次 RAG 查询记录完整 Trace：
 

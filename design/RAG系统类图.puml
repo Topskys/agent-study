@@ -5,82 +5,401 @@ skinparam packageStyle rectangle
 skinparam classBackgroundColor #F8F9FA
 skinparam classBorderColor #4A90D9
 skinparam arrowColor #333333
+skinparam interfaceBackgroundColor #E8F5E9
+skinparam interfaceBorderColor #2E7D32
 
-title RAG 系统类图（P0 极简版）
+title RAG 系统完整类图
 
-' ==================== 当前实现 ====================
-package "rag/basic_rag.py (当前实现)" as CURRENT {
-  class BasicRAG {
-    + api_key: str
-    + embed_model: str
-    + llm_model: str
-    + chunk_size: int
-    + chunk_overlap: int
-    - chunks: List[Dict]
-    --
-    + index_file(file_path: str) -> int
-    + index_text(text: str, metadata: dict) -> int
-    + search(query: str, top_k: int) -> List[Dict]
-    + query(query: str, top_k: int) -> Dict
-    + clear()
-    - _embed(texts: List[str]) -> ndarray
-    - _chunk(text: str) -> List[str]
-    - _llm_call(messages: List[Dict]) -> str
-    - _infer_embed_url(llm_url: str) -> str
+' ==================== 数据类型 ====================
+package "types" as TYPES {
+  class RawDocument <<dataclass>> {
+    + content: str
+    + source: str
+    + metadata: dict
+  }
+
+  class Chunk <<dataclass>> {
+    + chunk_id: str
+    + text: str
+    + metadata: dict
+    + embeddings: dict
+    + parent_id: str | None
+  }
+
+  class SearchResult <<dataclass>> {
+    + chunk: Chunk
+    + score: float
+    + rank: int
+  }
+
+  class RAGResult <<dataclass>> {
+    + answer: str
+    + sources: list[dict]
+    + confidence: float
+    + request_id: str
+    + latency_ms: float
+  }
+
+  class LogEntry <<dataclass>> {
+    + request_id: str
+    + timestamp: str
+    + user_query: str
+    + pipeline: dict
+    + retrieved_chunks: list
+    + generation: dict
+    + confidence: float
+    + latency_ms: float
+    + user_feedback: str | None
+  }
+
+  SearchResult --> Chunk : references
+}
+
+' ==================== 系统核心 ====================
+package "rag_system" as CORE {
+  class RAGSystem {
+    + query(text: str, top_k: int) -> RAGResult
+    + index_document(path: str) -> int
+    + batch_index(dir: str) -> dict
+    + clear_index()
+    - llm_client: Any
+  }
+
+  class ConfigLoader {
+    + load(path: str) -> dict
+    + get(*keys, default: Any) -> Any
+    + validate() -> bool
+  }
+
+  class PipelineLogger {
+    + new_request(query: str) -> str
+    + log_retrieval(query: str, results: list)
+    + log_generation(query: str, result: RAGResult)
+    + log_skip(query: str, reason: str)
+    + save(request_id: str)
+    + get_stats() -> dict
   }
 }
 
-' ==================== 后续优化 ====================
-package "后续优化 (P1/P2)" as FUTURE {
-  class LoaderFactory {
-    + get_loader(file_path: str) -> BaseLoader
+' ==================== 索引管线 ====================
+package "ingest" as INGEST {
+  class DocumentIndexer {
+    + index_document(path: str) -> int
+    + batch_index(dir: str) -> dict
+    - loader_factory: LoaderFactory
+    - chunker: BaseChunker
+    - embedder: BaseEmbedder
+    - store: BaseVectorStore
+    - bm25: BM25Index
   }
 
-  class BaseChunker <<abstract>> {
-    + chunk(doc: RawDocument) -> Chunk[]
+  class MetadataExtractor {
+    + extract(doc: RawDocument) -> dict
+    + extract_file_info(path: str) -> dict
   }
 
-  class BaseEmbedder <<abstract>> {
-    + embed(texts: List[str]) -> List[vector]
+  package "loader" as LOADER {
+    interface BaseLoader {
+      {abstract} + load(path: str) -> list[RawDocument]
+      {abstract} + supported_extensions() -> list[str]
+    }
+
+    class TextLoader {
+      + load(path: str) -> list[RawDocument]
+      - _parse_html(content: str) -> str
+      - _parse_vue(content: str) -> str
+    }
+
+    class DocxLoader {
+      + load(path: str) -> list[RawDocument]
+      - _extract_tables(doc: Any) -> list[str]
+    }
+
+    class PdfLoader {
+      + load(path: str) -> list[RawDocument]
+      - _extract_text(path: str) -> list[RawDocument]
+      - _extract_tables(path: str) -> list[RawDocument]
+      - _ocr_images(path: str) -> list[RawDocument]
+    }
+
+    class VideoLoader {
+      + load(path: str) -> list[RawDocument]
+      - _process_visual(path: str) -> list[RawDocument]
+      - _process_audio(path: str) -> list[RawDocument]
+    }
+
+    class LoaderFactory {
+      + get_loader(path: str) -> BaseLoader
+      + register_loader(ext: str, loader: type)
+      - _registry: dict
+    }
+
+    BaseLoader <|.. TextLoader
+    BaseLoader <|.. DocxLoader
+    BaseLoader <|.. PdfLoader
+    BaseLoader <|.. VideoLoader
+    LoaderFactory --> BaseLoader : creates
+    BaseLoader --> RawDocument : returns
   }
 
-  class BaseVectorStore <<abstract>> {
-    + search(collection: str, vec: List, top_k: int) -> List[SearchResult]
+  package "chunker" as CHUNKER {
+    interface BaseChunker {
+      {abstract} + chunk(doc: RawDocument) -> list[Chunk]
+    }
+
+    class RecursiveChunker {
+      + chunk_size: int
+      + chunk_overlap: int
+      + separators: list[str]
+      + chunk(doc: RawDocument) -> list[Chunk]
+    }
+
+    class SemanticChunker {
+      + threshold: float
+      + min_chunk_size: int
+      + embedder: BaseEmbedder
+      + chunk(doc: RawDocument) -> list[Chunk]
+    }
+
+    class ParentChildChunker {
+      + child_size: int
+      + parent_size: int
+      + child_chunker: BaseChunker
+      + chunk(doc: RawDocument) -> list[Chunk]
+    }
+
+    class ChunkerFactory {
+      + get_chunker(strategy: str, config: dict) -> BaseChunker
+    }
+
+    BaseChunker <|.. RecursiveChunker
+    BaseChunker <|.. SemanticChunker
+    BaseChunker <|.. ParentChildChunker
+    ChunkerFactory --> BaseChunker : creates
+    BaseChunker --> Chunk : returns
+  }
+
+  DocumentIndexer *-- LoaderFactory
+  DocumentIndexer *-- BaseChunker
+  DocumentIndexer *-- MetadataExtractor
+}
+
+' ==================== 嵌入层 ====================
+package "embed" as EMBED {
+  interface BaseEmbedder {
+    {abstract} + embed(texts: list[str]) -> list[list[float]]
+    {abstract} + dim: int
+    {abstract} + name: str
+  }
+
+  class LocalEmbedder {
+    + model_name: str = "BAAI/bge-m3"
+    + dim: int = 1024
+    + device: str
+    + quantize: bool
+    + embed(texts: list[str]) -> list[list[float]]
+  }
+
+  class ApiEmbedder {
+    + provider: str
+    + model_name: str
+    + dim: int
+    + api_key: str
+    + base_url: str
+    + embed(texts: list[str]) -> list[list[float]]
+  }
+
+  class EmbedRouter {
+    + embed(texts: list[str], mode: str) -> list[list[float]]
+    + set_fallback(fallback: BaseEmbedder)
+    - primary: BaseEmbedder
+    - fallback: BaseEmbedder
+    - batch_size: int
+  }
+
+  BaseEmbedder <|.. LocalEmbedder
+  BaseEmbedder <|.. ApiEmbedder
+  EmbedRouter *-- BaseEmbedder : primary
+  EmbedRouter o-- BaseEmbedder : fallback
+}
+
+' ==================== 向量存储 ====================
+package "store" as STORE {
+  interface BaseVectorStore {
+    {abstract} + create_collection(name: str, dim: int)
+    {abstract} + insert(collection: str, chunks: list[Chunk])
+    {abstract} + search(collection: str, vec: list, top_k: int) -> list[SearchResult]
+    {abstract} + delete(collection: str, ids: list[str])
+    {abstract} + delete_collection(name: str)
+  }
+
+  class MilvusStore {
+    + host: str
+    + port: int
+    + index_type: str = "HNSW"
+    + metric_type: str = "IP"
+  }
+
+  class ChromaStore {
+    + persist_dir: str
+    + collection_name: str
+  }
+
+  class BM25Index {
+    + add_docs(collection: str, chunks: list[Chunk])
+    + search(collection: str, query: str, top_k: int) -> list[SearchResult]
+    - _tokenize(text: str) -> list[str]
+    - _build_inverted_index(chunks: list[Chunk])
+  }
+
+  BaseVectorStore <|.. MilvusStore
+  BaseVectorStore <|.. ChromaStore
+  BaseVectorStore --> SearchResult : returns
+  BM25Index --> SearchResult : returns
+}
+
+' ==================== 检索管线 ====================
+package "retrieve" as RETRIEVE {
+  class QueryRewriter {
+    + rewrite(query: str) -> str
+    + expand(query: str) -> list[str]
+    + hyde(query: str, llm: Any) -> str
+    - llm_client: Any
   }
 
   class HybridRetriever {
-    + retrieve(query: str) -> List[SearchResult]
+    + retrieve(query: str, collection: str) -> list[SearchResult]
+    - _dense_search(query: str, collection: str) -> list[SearchResult]
+    - _bm25_search(query: str, collection: str) -> list[SearchResult]
+    - _rrf_fusion(results: list, top_k: int) -> list[SearchResult]
+    + dense_weight: float = 0.7
+    + bm25_weight: float = 0.3
+    + top_k: int = 10
   }
 
   class Reranker {
-    + rerank(query: str, results: List) -> List[SearchResult]
+    + rerank(query: str, results: list[SearchResult], top_k: int) -> list[SearchResult]
+    - _compute_scores(pairs: list) -> list[float]
+    + model_name: str = "BAAI/bge-reranker-v2-m3"
   }
 
   class SelfRAG {
     + need_retrieve(query: str) -> bool
+    + filter_relevant(query: str, results: list[SearchResult]) -> list[SearchResult]
+    + judge_support(query: str, answer: str, chunks: list[Chunk]) -> str
+    - llm_client: Any
   }
+
+  class CorrectiveRAG {
+    + supplement(query: str, results: list[SearchResult]) -> list[SearchResult]
+    + is_sufficient(results: list[SearchResult]) -> bool
+    - min_score: float
+    - web_search_fn: callable
+  }
+
+  class MultiRoundRetriever {
+    + retrieve(query: str, retriever_fn: callable) -> list[SearchResult]
+    + max_rounds: int = 3
+    - llm_client: Any
+  }
+
+  class RetrievalPipeline {
+    + retrieve(query: str, collection: str) -> list[SearchResult]
+    - enable_rewrite: bool
+    - enable_hyde: bool
+    - enable_multi_query: bool
+    - enable_self_rag: bool
+    - enable_crag: bool
+    - enable_multi_round: bool
+  }
+
+  RetrievalPipeline *-- QueryRewriter
+  RetrievalPipeline *-- HybridRetriever
+  RetrievalPipeline *-- Reranker
+  RetrievalPipeline *-- SelfRAG
+  RetrievalPipeline *-- CorrectiveRAG
+  RetrievalPipeline *-- MultiRoundRetriever
+  HybridRetriever ..> BaseVectorStore : uses
+  HybridRetriever ..> EmbedRouter : uses
+  HybridRetriever ..> BM25Index : uses
 }
 
-' ==================== 标注 ====================
-note right of CURRENT
-  **当前实现特点**
-  - 单文件 ~180 行
-  - 支持 .txt / .md
-  - API Embedding
-  - 内存向量 + numpy 检索
-  - LLM 生成
-end note
+' ==================== 生成管线 ====================
+package "generate" as GENERATE {
+  class ContextBuilder {
+    + build(query: str, results: list[SearchResult], max_tokens: int) -> str
+    + truncate(text: str, max_chars: int) -> str
+    + format_citations(results: list[SearchResult]) -> str
+    - token_budget_ratio: float = 0.5
+  }
 
-note right of FUTURE
-  **P1/P2 计划**
-  - 本地嵌入模型
-  - 持久化向量库
-  - BM25 + 稠密混合检索
-  - 重排序 / Self-RAG
-  - PDF/DOCX/视频加载
-  - 生产化配置
-end note
+  class RAGGenerator {
+    + generate(query: str, context: str, system_prompt: str) -> str
+    + evaluate_confidence(results: list[SearchResult], answer: str, context: str) -> float
+    - llm_client: Any
+    - model: str
+    - temperature: float
+    - max_tokens: int
+  }
 
-BasicRAG ..> FUTURE : 后续可逐步替换为
+  class CitationTracker {
+    + parse_citations(answer: str, results: list[SearchResult]) -> str
+    + extract_sources(answer: str) -> list[dict]
+    + format_sources(sources: list[dict]) -> str
+  }
+
+  class GenerationPipeline {
+    + generate(query: str, results: list[SearchResult], request_id: str) -> RAGResult
+  }
+
+  GenerationPipeline *-- ContextBuilder
+  GenerationPipeline *-- RAGGenerator
+  GenerationPipeline *-- CitationTracker
+  GenerationPipeline --> RAGResult : returns
+  GenerationPipeline ..> SelfRAG : uses
+}
+
+' ==================== 数据飞轮 ====================
+package "feedback" as FEED {
+  class DataFlywheel {
+    + record(query: str, result: RAGResult)
+    + submit_feedback(request_id: str, feedback: str, rating: int)
+    + get_low_confidence_queries(threshold: float) -> list[dict]
+    + generate_training_data(min_confidence: float) -> list[dict]
+    + export_for_finetune(path: str)
+    - high_conf_threshold: float = 0.85
+    - low_conf_threshold: float = 0.6
+  }
+
+  DataFlywheel --> LogEntry : records
+}
+
+' ==================== 全局关系 ====================
+package "全局组合关系" as GLOBAL {
+  RAGSystem *-- ConfigLoader
+  RAGSystem *-- PipelineLogger
+  RAGSystem *-- DocumentIndexer
+  RAGSystem *-- RetrievalPipeline
+  RAGSystem *-- GenerationPipeline
+  RAGSystem *-- EmbedRouter
+  RAGSystem *-- BaseVectorStore
+  RAGSystem *-- BM25Index
+  RAGSystem *-- DataFlywheel
+
+  DocumentIndexer *-- EmbedRouter
+  DocumentIndexer *-- BaseVectorStore
+  DocumentIndexer *-- BM25Index
+}
+
+' ==================== 图例 ====================
+legend right
+  |= 符号 | = 含义 =|
+  | <\|.. | 实现接口 (Implements) |
+  | *--   | 组合 (Composition) |
+  | ..>   | 依赖 (Dependency) |
+  | -->   | 关联 (Association) |
+  | <<dataclass>> | 数据类 |
+  | <<interface>> | 接口/抽象类 |
+endlegend
 
 @enduml
