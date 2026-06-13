@@ -55,22 +55,20 @@ class RecursiveChunker(BaseChunker):
 
         while start < text_len:
             end = start + self.chunk_size
-            # 剩余文本不足一个 chunk，直接收尾
             if end >= text_len:
                 chunks.append(text[start:].strip())
                 break
 
-            # 在当前窗口内找最优分隔位置
             split_pos = self._find_split(text, start, end)
 
             chunk_text = text[start:split_pos].strip()
             if chunk_text:
                 chunks.append(chunk_text)
 
-            # 滑动 start，保留 overlap 部分
-            start = split_pos - self.chunk_overlap
-            if start < split_pos - self.chunk_size // 2:
-                start = split_pos
+            new_start = split_pos - self.chunk_overlap
+            if new_start <= start:
+                new_start = split_pos
+            start = new_start
 
         return chunks
 
