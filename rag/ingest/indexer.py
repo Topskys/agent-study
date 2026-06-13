@@ -51,6 +51,8 @@ class DocumentIndexer:
         all_chunks: list[Chunk] = []
         for doc in raw_docs:
             chunks = self.chunker.chunk(doc)
+            for c in chunks:
+                c.metadata.setdefault("source", doc.source)
             all_chunks.extend(chunks)
 
         if not all_chunks:

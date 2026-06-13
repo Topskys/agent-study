@@ -35,6 +35,7 @@ class RAGSystem:
         self,
         api_key: str = "",
         base_url: str = "",
+        embed_base_url: str = "",
         embed_model: str = "openai/text-embedding-3-small",
         llm_model: str = "openai/gpt-4o-mini",
         embedder: BaseEmbedder | None = None,
@@ -46,6 +47,7 @@ class RAGSystem:
         self._config = config or {}
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
+        self._embed_base_url = embed_base_url.rstrip("/") if embed_base_url else ""
         self._embed_model = embed_model
         self._llm_model = llm_model
 
@@ -70,9 +72,15 @@ class RAGSystem:
 
             return LocalEmbedder()
         cfg = self._config.get("embedding", {})
+        embed_url = self._embed_base_url or self._base_url
+        if "chat/completions" in embed_url:
+            embed_url = embed_url.replace("chat/completions", "embeddings")
+        embed_url = embed_url.rstrip("/")
+        if embed_url.endswith("/embeddings"):
+            embed_url = embed_url[: -len("/embeddings")]
         return ApiEmbedder(
             api_key=self._api_key,
-            base_url=self._base_url,
+            base_url=embed_url,
             model=self._embed_model,
             dim=cfg.get("dim", 1536),
         )
@@ -90,9 +98,12 @@ class RAGSystem:
 
             return _EmptyGenerator()
         gen_cfg = self._config.get("generation", {})
+        llm_url = self._base_url.rstrip("/")
+        if llm_url.endswith("/chat/completions"):
+            llm_url = llm_url[: -len("/chat/completions")]
         return RAGGenerator(
             api_key=self._api_key,
-            base_url=self._base_url,
+            base_url=llm_url,
             model=self._llm_model,
             context_builder=ContextBuilder(
                 config={"max_tokens": gen_cfg.get("max_tokens", 4096)}

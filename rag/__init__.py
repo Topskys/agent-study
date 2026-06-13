@@ -17,7 +17,14 @@ from .chunker import (
     ChunkerFactory,
 )
 from .embed import BaseEmbedder, ApiEmbedder, LocalEmbedder, EmbedRouter
-from .store import BaseVectorStore, MemoryStore, MilvusStore, ChromaStore, BM25Index
+from .store import (
+    BaseVectorStore,
+    MemoryStore,
+    MilvusStore,
+    ChromaStore,
+    BM25Index,
+    PGVectorStore,
+)
 from .ingest import DocumentIndexer
 from .retrieve import (
     BaseRetriever,
@@ -62,6 +69,7 @@ __all__ = [
     "MilvusStore",
     "ChromaStore",
     "BM25Index",
+    "PGVectorStore",
     "DocumentIndexer",
     "BaseRetriever",
     "QueryRewriter",
