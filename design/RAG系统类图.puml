@@ -1,0 +1,86 @@
+@startuml
+!theme plain
+skinparam defaultFontName Microsoft YaHei
+skinparam packageStyle rectangle
+skinparam classBackgroundColor #F8F9FA
+skinparam classBorderColor #4A90D9
+skinparam arrowColor #333333
+
+title RAG 系统类图（P0 极简版）
+
+' ==================== 当前实现 ====================
+package "rag/basic_rag.py (当前实现)" as CURRENT {
+  class BasicRAG {
+    + api_key: str
+    + embed_model: str
+    + llm_model: str
+    + chunk_size: int
+    + chunk_overlap: int
+    - chunks: List[Dict]
+    --
+    + index_file(file_path: str) -> int
+    + index_text(text: str, metadata: dict) -> int
+    + search(query: str, top_k: int) -> List[Dict]
+    + query(query: str, top_k: int) -> Dict
+    + clear()
+    - _embed(texts: List[str]) -> ndarray
+    - _chunk(text: str) -> List[str]
+    - _llm_call(messages: List[Dict]) -> str
+    - _infer_embed_url(llm_url: str) -> str
+  }
+}
+
+' ==================== 后续优化 ====================
+package "后续优化 (P1/P2)" as FUTURE {
+  class LoaderFactory {
+    + get_loader(file_path: str) -> BaseLoader
+  }
+
+  class BaseChunker <<abstract>> {
+    + chunk(doc: RawDocument) -> Chunk[]
+  }
+
+  class BaseEmbedder <<abstract>> {
+    + embed(texts: List[str]) -> List[vector]
+  }
+
+  class BaseVectorStore <<abstract>> {
+    + search(collection: str, vec: List, top_k: int) -> List[SearchResult]
+  }
+
+  class HybridRetriever {
+    + retrieve(query: str) -> List[SearchResult]
+  }
+
+  class Reranker {
+    + rerank(query: str, results: List) -> List[SearchResult]
+  }
+
+  class SelfRAG {
+    + need_retrieve(query: str) -> bool
+  }
+}
+
+' ==================== 标注 ====================
+note right of CURRENT
+  **当前实现特点**
+  - 单文件 ~180 行
+  - 支持 .txt / .md
+  - API Embedding
+  - 内存向量 + numpy 检索
+  - LLM 生成
+end note
+
+note right of FUTURE
+  **P1/P2 计划**
+  - 本地嵌入模型
+  - 持久化向量库
+  - BM25 + 稠密混合检索
+  - 重排序 / Self-RAG
+  - PDF/DOCX/视频加载
+  - 生产化配置
+end note
+
+BasicRAG ..> FUTURE : 后续可逐步替换为
+
+@enduml
