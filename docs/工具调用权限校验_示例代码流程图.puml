@@ -1,0 +1,211 @@
+@startuml
+' ===================== 全局样式 =====================
+skinparam linetype ortho
+skinparam linecolor #1F2937
+skinparam linethickness 1.2
+
+skinparam startnode {
+    BackgroundColor #E0F2FE
+    BorderColor #3B82F6
+    BorderThickness 2
+    FontName "Microsoft Yahei"
+    FontSize 11
+}
+
+skinparam endnode {
+    BackgroundColor #D1FAE5
+    BorderColor #10B981
+    BorderThickness 2
+    FontName "Microsoft Yahei"
+    FontSize 11
+}
+
+skinparam activity {
+    BackgroundColor #F9FAFB
+    BorderColor #6B7280
+    BorderThickness 1.5
+    RoundCorner 8
+    FontName "Microsoft Yahei"
+    FontSize 11
+}
+
+skinparam decision {
+    BackgroundColor #FFFBEB
+    BorderColor #F59E0B
+    BorderThickness 2
+    RoundCorner 10
+    FontName "Microsoft Yahei"
+    FontSize 11
+}
+
+skinparam arrow {
+    Color #1F2937
+    FontName "Microsoft Yahei"
+    FontSize 10
+}
+
+skinparam note {
+    BackgroundColor #FFFFFF
+    BorderColor #D1D5DB
+    RoundCorner 6
+    FontName "Microsoft Yahei"
+    FontSize 10
+}
+
+' ===================== 开始 =====================
+
+start
+
+:用户输入自然语言 Query;
+note left
+  示例：帮我查一下
+  订单 12345 的物流状态
+end note
+
+:LLM 生成 ToolCallRequest;
+note right
+  携带：
+  user_query
+  tool_name
+  tool_params
+  agent_role
+  task_id
+end note
+
+' ===================== 第一层：限流 =====================
+partition "限流与防滥用" {
+    :执行滑动窗口限流校验;
+    if (是否超过调用频率?) then (是)
+        :拒绝调用;
+        note left
+          原因：
+          单用户单工具
+          调用频次超限
+        end note
+        :生成 ToolCallResult;
+        :写入审计日志;
+        end
+    endif
+}
+
+' ===================== 第二层：权限 =====================
+partition "权限边界校验" {
+    :校验静态角色权限 + 任务临时授权;
+    if (是否拥有该工具调用权限?) then (否)
+        :拒绝调用;
+        note left
+          原因：
+          角色权限不足
+          或临时授权已过期
+        end note
+        :生成 ToolCallResult;
+        :写入审计日志;
+        end
+    endif
+}
+
+' ===================== 第三层：参数 Key =====================
+partition "参数结构校验" {
+    :校验参数 Key 是否在白名单内;
+    if (存在非法参数 Key?) then (是)
+        :拒绝调用;
+        note left
+          原因：
+          传入未允许参数
+          可能存在参数注入
+        end note
+        :生成 ToolCallResult;
+        :写入审计日志;
+        end
+    endif
+}
+
+' ===================== 第四层：参数值 =====================
+partition "参数内容安全" {
+    :检测参数值中的高危字符;
+    if (参数包含风险字符?) then (是)
+        :拒绝调用;
+        note left
+          拦截：
+          /etc/
+          ../
+          rm -rf
+          drop table
+          exec( 等
+        end note
+        :生成 ToolCallResult;
+        :写入审计日志;
+        end
+    endif
+}
+
+' ===================== 第五层：上下文 =====================
+partition "上下文意图校验" {
+    :匹配用户 Query 与工具业务语义;
+    if (用户需求与工具操作是否匹配?) then (否)
+        :拒绝调用;
+        note left
+          原因：
+          工具调用与用户意图无关
+          疑似提示注入劫持
+        end note
+        :生成 ToolCallResult;
+        :写入审计日志;
+        end
+    endif
+}
+
+' ===================== 第六层：风险分级 =====================
+partition "风险分级与审批" {
+    :读取工具风险等级 PermissionLevel;
+
+    if (风险等级 == FORBIDDEN) then
+        :直接拒绝调用;
+        note left
+          禁止级工具
+          不允许自动调用
+        end note
+        :写入审计日志;
+        end
+    elseif (风险等级 == HIGH_RISK) then
+        if (人工审批是否已通过?) then (否)
+            :加入人工审批队列;
+            :生成待审批结果;
+            :写入审计日志;
+            end
+        else (是)
+            :放行进入沙箱执行;
+        endif
+    else
+        :自动放行进入沙箱执行;
+    endif
+}
+
+' ===================== 执行链路 =====================
+partition "安全执行与审计" {
+    :隔离沙箱执行工具逻辑;
+    :对原始返回数据脱敏;
+    note right
+      隐藏：
+      phone
+      id_card
+      bank_card
+      password
+      secret_key
+    end note
+
+    :生成完整 ToolCallResult;
+    note right
+      包含：
+      raw_output
+      safe_output
+      allowed
+      reason
+    end note
+
+    :持久化全量 AuditRecord;
+    :将脱敏结果返回给 LLM;
+}
+
+end
+@enduml
