@@ -1,17 +1,17 @@
-"""ReAct Agent（function calling 版）。
+"""function calling + Thought 的 ReAct Agent。
 
-ReAct = Reason + Act + Observe 的循环：
-- reason：调模型，让它决定下一步（输出答案或发起工具调用）
-- act：模型发起工具调用时，执行工具
-- observe：把工具结果写回记忆，进入下一轮推理
+保留原生 function calling（tools 参数），同时要求模型在每次工具调用前，
+把推理过程写到 assistant 消息的 content 字段（Thought），以便观察决策链。
 
-本实现基于原生 function calling（tools 参数），工具的 JSON schema 来自 tool_schemas.json。
+ReAct 循环：
+- reason：调模型，拿到 assistant 消息（content=Thought，tool_calls=Action）
+- act：执行工具调用
+- observe：把工具结果写回记忆
 
 模块划分：
-- tool_schemas.json  工具 schema
-- tools.py           工具层：实现、分发
-- config.py          配置层：YAML 加载
-- agent.py           ReAct 循环 + 入口
+- tools.py          工具层：实现、分发
+- config.py         配置层：YAML 加载
+- react_thought.py  本文件：function calling + Thought 循环
 """
 
 import json
@@ -23,9 +23,19 @@ from openai import OpenAI
 from config import DEFAULT_CONFIG_PATH, load_config
 from tools import TOOLS, run_tool
 
+THOUGHT_PROMPT = """你是一个可以使用工具来解决问题的智能助手。
 
-class Agent:
-    """ReAct Agent：reason → act → observe 循环，记忆随实例存续。"""
+规则：
+1. 在调用工具之前，必须先把推理过程写到响应的 content 字段，格式为：
+   Thought: 你的推理（为什么要调用这个工具、打算怎么做）
+2. 然后通过 tool_calls 发起工具调用
+3. 看到工具结果后，如果还需要更多信息，继续重复上面两步；
+   如果已得到答案，直接输出最终答案（可带简短推理）。
+"""
+
+
+class ThoughtAgent:
+    """function calling + Thought：模型显式输出推理后调工具。"""
 
     def __init__(
         self,
@@ -43,23 +53,18 @@ class Agent:
         self.timeout = int(llm.get("timeout", 120))
         self.max_retries = int(llm.get("max_retries", 3))
         self.max_rounds = int(cfg.get("agent", {}).get("max_rounds", 10))
-        self.system_prompt = cfg.get("agent", {}).get("system_prompt")
 
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
             timeout=self.timeout,
         )
-        self.memory: list = [{"role": "system", "content": self.system_prompt}]
+        self.memory: list = [{"role": "system", "content": THOUGHT_PROMPT}]
 
     def reset(self):
-        """清空记忆，开始全新会话。"""
-        self.memory = [{"role": "system", "content": self.system_prompt}]
-
-    # ---------- ReAct 三步骤 ----------
+        self.memory = [{"role": "system", "content": THOUGHT_PROMPT}]
 
     def reason(self) -> object:
-        """Reason：调模型。返回 ChatCompletionMessage。"""
         for attempt in range(self.max_retries + 1):
             try:
                 resp = self.client.chat.completions.create(
@@ -85,30 +90,6 @@ class Agent:
                 raise
         raise RuntimeError("重试次数用尽")
 
-    def act(self, call) -> str:
-        """Act：执行一个工具调用，返回观察结果。"""
-        fn = call.function
-        try:
-            args = json.loads(fn.arguments or "{}")
-        except json.JSONDecodeError:
-            args = {}
-        result = run_tool(fn.name, args)
-        print(f"  [tool] {fn.name}({json.dumps(args, ensure_ascii=False)}) -> {result}")
-        return result
-
-    def observe(self, call, result: str):
-        """Observe：把工具调用与结果写回记忆。"""
-        self.memory.append(
-            {
-                "role": "tool",
-                "tool_call_id": call.id,
-                "name": call.function.name,
-                "content": result,
-            }
-        )
-
-    # ---------- 主循环 ----------
-
     def run(self, user_input: str, max_rounds: int | None = None) -> str:
         self.memory.append({"role": "user", "content": user_input})
         max_rounds = max_rounds or self.max_rounds
@@ -123,24 +104,41 @@ class Agent:
                 }
             )
 
+            if msg.content:
+                print(f"  [thought] {msg.content[:200]}")
+
             if not msg.tool_calls:
                 return msg.content or "（无输出）"
 
             for call in msg.tool_calls:
-                result = self.act(call)
-                self.observe(call, result)
+                fn = call.function
+                try:
+                    args = json.loads(fn.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                result = run_tool(fn.name, args)
+                print(
+                    f"  [tool] {fn.name}({json.dumps(args, ensure_ascii=False)}) -> {result}"
+                )
+                self.memory.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "name": fn.name,
+                        "content": result,
+                    }
+                )
 
         return "达到最大迭代轮数，未获得最终答案"
 
 
-def run_agent(question: str, max_rounds: int = 10) -> str:
-    """一次性调用（无状态），每次新建会话。需要跨轮次记忆请用 Agent。"""
-    return Agent().run(question, max_rounds)
+def run_thought_agent(question: str, max_rounds: int = 10) -> str:
+    return ThoughtAgent().run(question, max_rounds)
 
 
 if __name__ == "__main__":
-    agent = Agent()
-    print("Agent MVP（/exit 退出；/reset 清空记忆）")
+    agent = ThoughtAgent()
+    print("Thought Agent（/exit 退出；/reset 清空记忆）")
     while True:
         question = input("You: ")
         if question.strip().lower() in ("/exit", "/quit"):
