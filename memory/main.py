@@ -1,4 +1,4 @@
-from src.core.memory_system import MemorySystem
+from memory_system.core.memory_system import MemorySystem
 
 
 def main():

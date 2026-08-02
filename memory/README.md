@@ -29,7 +29,7 @@
 
 ## 类图
 
-> 基于 `src/` 实际代码生成，反映当前真实实现（47/47 测试通过）。
+> 基于 `memory_system/` 实际代码生成，反映当前真实实现（47/47 测试通过）。
 
 ```mermaid
 classDiagram
@@ -373,7 +373,7 @@ classDiagram
 memory/
 ├── main.py                      # 演示示例
 ├── pyproject.toml               # uv 项目配置
-├── src/
+├── memory_system/
 │   ├── core/                    # 核心逻辑
 │   │   ├── memory_system.py     # 系统入口，管理所有用户
 │   │   ├── user_memory.py       # 单用户记忆整合
@@ -406,8 +406,11 @@ memory/
 ## 快速开始
 
 ```bash
-# 安装依赖（创建 .venv）
+# 安装基础依赖（mock 嵌入，秒级，无语义）
 uv sync
+
+# 需要真实语义嵌入时（BGE 本地模型）：
+uv sync --extra real
 
 # 运行演示
 uv run python main.py
@@ -416,10 +419,12 @@ uv run python main.py
 uv run pytest tests/ -v
 ```
 
+嵌入模式由环境变量 `MEMORY_EMBED_MODE` 控制：`mock`（确定性哈希，测试用）或 `real`（默认，需本地 BGE 模型）。
+
 ## 使用示例
 
 ```python
-from src.core.memory_system import MemorySystem
+from memory_system.core.memory_system import MemorySystem
 
 memory_system = MemorySystem(db_path="memory_system.db")
 

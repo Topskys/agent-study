@@ -5,26 +5,26 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from src.core.memory_cleaner import MemoryCleaner
-from src.core.memory_filter import MemoryFilter
-from src.core.memory_governance import MemoryGovernance
-from src.core.memory_scorer import MemoryScorer
-from src.core.memory_system import MemorySystem
-from src.core.memory_versioner import MemoryVersioner
-from src.core.session_memory import SessionMemory
-from src.core.user_memory import UserMemory
-from src.core.working_memory import WorkingMemory
-from src.models.event import Event
-from src.models.graph import GraphEdge, GraphNode
-from src.models.memory_item import MemoryItem, MemoryType
-from src.models.user_profile import UserProfile
-from src.models.version import MemoryVersion
-from src.stores.event_store import EventStreamStore
-from src.stores.graph_store import GraphStore
-from src.stores.kv_store import KeyValueStore
-from src.stores.vector_store import VectorStore
-from src.utils.embeddings import cosine_similarity, generate_embedding
-from src.utils.id_generator import generate_id
+from memory_system.core.memory_cleaner import MemoryCleaner
+from memory_system.core.memory_filter import MemoryFilter
+from memory_system.core.memory_governance import MemoryGovernance
+from memory_system.core.memory_scorer import MemoryScorer
+from memory_system.core.memory_system import MemorySystem
+from memory_system.core.memory_versioner import MemoryVersioner
+from memory_system.core.session_memory import SessionMemory
+from memory_system.core.user_memory import UserMemory
+from memory_system.core.working_memory import WorkingMemory
+from memory_system.models.event import Event
+from memory_system.models.graph import GraphEdge, GraphNode
+from memory_system.models.memory_item import MemoryItem, MemoryType
+from memory_system.models.user_profile import UserProfile
+from memory_system.models.version import MemoryVersion
+from memory_system.stores.event_store import EventStreamStore
+from memory_system.stores.graph_store import GraphStore
+from memory_system.stores.kv_store import KeyValueStore
+from memory_system.stores.vector_store import VectorStore
+from memory_system.utils.embeddings import cosine_similarity, generate_embedding
+from memory_system.utils.id_generator import generate_id
 
 
 # ===== Fixtures =====

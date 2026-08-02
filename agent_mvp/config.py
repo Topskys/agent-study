@@ -1,10 +1,11 @@
-"""配置层：YAML 配置加载，支持 ${ENV_VAR} 占位符替换。"""
+"""配置层：加载 .env 环境变量，再解析 YAML 配置（支持 ${ENV_VAR} 占位符）。"""
 
 import os
 import re
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
@@ -12,7 +13,9 @@ SYSTEM_PROMPT = "你是一个可以调用工具来帮助用户的智能助手，
 
 
 def load_config(path: str | os.PathLike = DEFAULT_CONFIG_PATH) -> dict:
-    """从 YAML 加载配置，并支持 ${ENV_VAR} 占位符替换。"""
+    """先加载 .env，再从 YAML 加载配置，支持 ${ENV_VAR} 占位符替换。"""
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+
     with open(path, "r", encoding="utf-8") as f:
         text = f.read()
 

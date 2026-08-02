@@ -372,7 +372,9 @@ wheels = [
 name = "memory-system"
 version = "0.1.0"
 source = { editable = "." }
-dependencies = [
+
+[package.optional-dependencies]
+real = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "sentence-transformers" },
@@ -385,9 +387,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "numpy", specifier = ">=1.24.0" },
-    { name = "sentence-transformers", specifier = ">=2.2.0" },
+    { name = "numpy", marker = "extra == 'real'", specifier = ">=1.24.0" },
+    { name = "sentence-transformers", marker = "extra == 'real'", specifier = ">=2.2.0" },
 ]
+provides-extras = ["real"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.1.1" }]

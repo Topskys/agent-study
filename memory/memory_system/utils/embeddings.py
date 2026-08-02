@@ -10,6 +10,7 @@
     默认 real                使用 BGE-small-zh-v1.5 真实语义嵌入
 """
 
+import hashlib
 import math
 import os
 import random
@@ -52,8 +53,12 @@ def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
 
 
 def _hash_embedding(text: str, dimensions: int = _EMBED_DIM) -> List[float]:
-    """确定性哈希伪向量（mock 模式，仅用于测试速度，无语义）。"""
-    seed = hash(text) & 0x7FFFFFFF
+    """确定性哈希伪向量（mock 模式，仅用于测试速度，无语义）。
+
+    用 hashlib 而非内置 hash()：后者每次进程启动的盐不同，
+    会导致跨进程检索时同一文本的向量不一致。
+    """
+    seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest(), 16) & 0x7FFFFFFF
     rng = random.Random(seed)
     return [rng.random() for _ in range(dimensions)]
 

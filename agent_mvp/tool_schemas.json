@@ -40,5 +40,28 @@
         "required": ["path"]
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "remember",
+      "description": "把值得长期保留的用户信息（事实、偏好等）写入长期记忆并持久化，供后续会话回忆使用。仅在出现值得记住的信息时调用，日常闲聊无需调用。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "要记住的内容，尽量精炼为一句客观事实，例如：用户叫洛克，是一名大模型应用开发工程师"
+          },
+          "importance": {
+            "type": "number",
+            "description": "重要性 0~1，默认 0.8；越重要越容易被长期保留",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": ["content"]
+      }
+    }
   }
 ]
