@@ -1,0 +1,26 @@
+[project]
+name = "intent-recognizer"
+version = "0.1.0"
+description = "意图识别模块（v3 两阶段）：多意图识别 + 批量槽位抽取 + 聚合追问 + 并行/串行调度"
+requires-python = ">=3.11"
+dependencies = [
+    "memory-system",
+]
+
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+
+[tool.uv.sources]
+memory-system = { path = "../memory", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["intent_recognizer"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
