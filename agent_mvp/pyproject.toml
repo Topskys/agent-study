@@ -5,9 +5,11 @@ description = "Agent MVP：openai 库 + function calling + while 循环"
 requires-python = ">=3.11"
 dependencies = [
     "memory-system[real]",
+    "intent-recognizer",
     "openai>=1.0.0",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0",
+    "tavily-python>=0.7.0",
 ]
 
 [tool.uv]
@@ -15,3 +17,9 @@ index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 [tool.uv.sources]
 memory-system = { path = "../memory", editable = true }
+intent-recognizer = { path = "../intent", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

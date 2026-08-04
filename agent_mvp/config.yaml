@@ -22,3 +22,17 @@ memory:
   user_id: default_user
   top_k: 3
   session_importance: 0.8
+
+intent:
+  # v3 两阶段 LLM 识别（embedding/fuzzy 阈值已随 embedding 层移除）
+  confirm_timeout: 30
+  highrisk_timeout: 60
+
+tools:
+  # 联网搜索：Bing Web Search API v7 订阅密钥（可在 .env 配置 BING_SEARCH_API_KEY）
+  bing_search_api_key: ${BING_SEARCH_API_KEY}
+  # Tavily AI Search API 密钥（可在 .env 配置 TVLY_API_KEY 或 TAVILY_API_KEY）
+  tavily_api_key: ${TVLY_API_KEY}
+
+safety:
+  high_risk_keywords: ["删除", "删掉", "删", "清空", "清除", "全部", "批量", "群发", "外发", "永久", "注销"]

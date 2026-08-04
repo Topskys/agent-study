@@ -44,11 +44,17 @@ uv run python agent.py
 | `OPENAI_API_KEY` | API 密钥（必填） |
 | `OPENAI_BASE_URL` | API 地址，可选；传完整 `/chat/completions` 端点会自动裁剪为 SDK 所需 base URL |
 | `LLM_MODEL` | 模型名，默认 `deepseek-ai/deepseek-v4-flash` |
+| `BING_SEARCH_API_KEY` | Bing Web Search API 订阅密钥（联网搜索用，可选） |
+| `TVLY_API_KEY` / `TAVILY_API_KEY` | Tavily AI Search API 密钥（联网搜索用，可选） |
 
 ## 内置工具
 
 - **calculator(expression)** — 计算数学表达式，支持四则运算、括号及常用数学函数（`sqrt`、`log`、`sin` 等）
 - **get_time()** — 获取当前日期和时间
+- **read_file(path)** — 读取文本文件，超长内容自动截断
+- **remember(content, importance)** — 把值得长期保留的用户信息写入长期记忆（是否调用由模型判断）
+- **web_search(query, count)** — 联网搜索实时信息（Bing Web Search API v7，需配置 `BING_SEARCH_API_KEY`）
+- **tavily_search(query, max_results, search_depth)** — 联网搜索实时信息（Tavily AI Search，专为 AI 优化，返回结构化结果与 AI 生成答案，需配置 `TVLY_API_KEY` 或 `TAVILY_API_KEY`）
 
 ## 防注入
 

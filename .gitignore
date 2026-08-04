@@ -16,7 +16,7 @@ venv/
 env/
 
 # Environment files
-.env
+.env*
 
 # IDE
 .vscode/
@@ -31,3 +31,8 @@ Thumbs.db
 *.html
 *.ttf
 nul
+
+# Local embedding models (downloaded, not committed)
+memory/models/
+
+*.db

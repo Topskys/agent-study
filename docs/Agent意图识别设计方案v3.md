@@ -1,6 +1,6 @@
 # Agent 意图识别设计方案（V3）—— 两阶段 LLM 多意图识别
 
-> 版本：V2.0（在 V1.0 基础上新增：数据表对接设计、技术栈、完整模块类图；**整体架构不变**）
+> 版本：V3.0（两阶段 LLM 多意图识别，替代 v1/v2 单轮五维度并行方案；已按 intent/ 实际实现校验类图与数据表对接）
 > 状态：设计定稿
 > 定位：**独立模块** `intent/`，作为 agent_mvp 的依赖子模块接入，替换沿用 v1/v2 的单轮多模块并行方案
 > 技术栈：Python ≥ 3.11 + SQLite（sqlite3）+ memory-system（BGE/mock 嵌入）；**不绑定 LangGraph/LangChain 等重框架**，纯自研编排可落地
@@ -127,8 +127,8 @@ flowchart TD
 - 汇总 `missSlots`。
 
 ### 4.4 调度器置信度三档分发（统一决策路由）
-- 置信度并入风险折算：安全维度判定高危 → 自动压至低档；
-- 单一路由口径，无独立风险闸门。
+- 高风险拦截先行：规则层命中高危关键词 → 直接拦截（不进入置信度路由）；
+- 中低风险并入置信度折算：单一路由口径，无独立风险闸门。
 
 | 置信度 | 分支 | 默认行为 |
 | ---- | ---- | ---- |
@@ -153,9 +153,11 @@ flowchart TD
 - 并行任务：并发执行同步运行；
 - 串行任务：按依赖顺序依次调度。
 
-### 4.9 会话存储（SessionStoreService）
-- SQLite：会话主表 + 意图配置表；
-- pgvector：上下文语义召回（代词消解、历史实体参考）。
+### 4.9 会话状态持久化（数据访问层）
+- 复用 agent_memory.db 现有记忆模块数据表，**不新建会话 / 配置表**；
+- 会话历史 / 意图检查点 / 槽位缓存 → `memory_items`（以 `memory_type` 区分）；
+- 审计事件 → `event_stream`；规则 / 配置覆盖 → `kv_items`；用户画像 → `user_profiles`；
+- 语义召回复用 memory-system 嵌入与 `memory_items.embedding` 列（详见 §8）。
 
 ---
 
@@ -193,6 +195,8 @@ classDiagram
         +get_all_intents() list[IntentMeta]
         +get_vocab() list[str]
         +get_risk_keywords() list[str]
+        +confidence_threshold : float
+        +high_confidence_threshold : float
     }
     class IntentMeta {
         +intent_id : str
@@ -223,8 +227,10 @@ classDiagram
     class RuleCheckService {
         +check(text) RuleHit
         +assess_risk(text, actions) str
-        -_match_persist(text) str|None
-        -_match_query(text) str|None
+        -_match_high_risk(text) str|None
+        -_match_persist(text) bool
+        -_match_query(text) bool
+        -_match_tool(text) str|None
     }
     class RuleHit {
         +intent_id : str|None
@@ -254,17 +260,20 @@ classDiagram
 
     %% ========== 交互与调度 ==========
     class AskPromptService {
+        +format_missing(result) str
         +build_prompt(result) str
-        +ask(result, ask_user, timeout) str|None
-        -format_missing(result) str
+        +build_confirm_prompt(intents) str
+        +build_invalid_prompt(invalid_slots) str
+        +ask(prompt, ask_user, timeout) str|None
     }
     class IntentDependService {
-        +parse(intents) list[TaskGroup]
+        +parse(intents, text) list[TaskGroup]
     }
     class TaskScheduleService {
-        +schedule(groups, executor) dict
-        -run_parallel(tasks) list
-        -run_serial(tasks) list
+        +schedule(groups, executor, slots) dict
+        +run_parallel(tasks, executor) dict
+        +run_serial(tasks, executor) list
+        -_run(intent_id, kv, executor) any
     }
 
     %% ========== 数据访问层（对接现有记忆模块数据表）==========
@@ -272,10 +281,11 @@ classDiagram
         -db_path : str
         +read_memories(user_id, memory_type, limit) list[dict]
         +read_long_term(user_id, limit) list[dict]
-        +read_intent_cache(user_id, session_id) dict|None
+        +read_session(user_id, limit) list[dict]
+        +read_intent_cache(user_id, session_id) FirstStageResult|None
         +read_slot_cache(user_id, session_id) dict
-        +write_intent_cache(user_id, session_id, data) void
-        +write_slot_cache(user_id, session_id, data) void
+        +write_intent_cache(user_id, session_id, result) void
+        +write_slot_cache(user_id, session_id, slots) void
     }
     class ProfileStore {
         -db_path : str
@@ -288,8 +298,9 @@ classDiagram
     }
     class KvStore {
         -db_path : str
-        +get(key) str|None
+        +get(key) any|None
         +set(key, value, ttl) void
+        +delete(key) void
     }
 
     %% ========== 结果模型 ==========
@@ -330,6 +341,8 @@ classDiagram
         +original : str
         +processed : str
         +ask_prompt : str|None
+        +execution_results : dict
+        +primary_intent : str|None
     }
 
     %% ========== 关系 ==========
@@ -352,8 +365,7 @@ classDiagram
     FirstStageIntentService --> RuleCheckService
     SecondStageSlotService --> ConfigManager
     FirstStageResult --> IntentRecognizeItem
-    ExecutionPlan --> FirstStageResult
-    ExecutionPlan --> SecondStageResult
+    ExecutionPlan --> IntentRecognizeItem
     ExecutionPlan --> TaskGroup
     TaskScheduleService --> TaskGroup
 
@@ -368,7 +380,7 @@ classDiagram
 
 ## 6. 两阶段标准数据结构
 
-### 4.1 第一阶段 LLM 输出（多意图数组）
+### 6.1 第一阶段 LLM 输出（多意图数组）
 ```json
 [
   {"intent_id": "bill_query", "intent": "月度账单查询", "confidence": 0.96,
@@ -379,7 +391,7 @@ classDiagram
 ]
 ```
 
-### 4.2 第二阶段槽位抽取输出
+### 6.2 第二阶段槽位抽取输出
 ```json
 [
   {"intent_id": "bill_query",
@@ -525,11 +537,11 @@ classDiagram
 
 | 维度 | v2 | v3 |
 | ---- | ---- | ---- |
-| 核心模型 | 单轮五维度并行 + 调度器置信度三档 | **两阶段 LLM**：阶段一题意多意图，阶段二批量抽槽位 |
+| 核心模型 | 单轮五维度并行 + 调度器置信度三档 | **两阶段 LLM**：阶段一识别多意图，阶段二批量抽槽位 |
 | 多意图 | 规则/语义层近似 | 天然多意图数组 + 并行/串行依赖 |
-| 追问 | `ask_user` 单条补全 | 缺失字段聚龄一次问全 + 槽位缓存复用 |
+| 追问 | `ask_user` 单条补全 | 缺失字段聚合一次问全 + 槽位缓存复用 |
 | 槽位 | 隐性（action/target/slots） | 显式 IntentMeta/SlotMeta 配置驱动 |
 | 存储 | 内存态 ExecutionPlan | SQLite 会话持久化 + pgvector 语义召回 |
 | 兜底 | 规则五模块 | 规则引擎重试 2 次 + 关键词兜底 |
 
-> 复用：v2 的 `RuleModule`（高频硬信号）、`SafetyModule`（高风险拦截）、`Preprocessor`（错别字/代词）可迁移为 v3 的规则前置校验引擎；协调器保留置信度（并入风险折算）首档直返整数。
+> 复用：v2 的 `RuleModule`（高频硬信号）、`SafetyModule`（高风险拦截）、`Preprocessor`（错别字/代词）可迁移为 v3 的规则前置校验引擎；调度器保留置信度（并入风险折算），首档（＞0.9）直接返回可执行计划。

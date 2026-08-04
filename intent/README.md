@@ -9,7 +9,7 @@
 - **并行/串行调度**：多意图按依赖分组，组内并行、组间串行
 - **数据访问层直连现有记忆库**：复用 agent_memory.db 的 memory_items / user_profiles / event_stream / kv_items，不新建会话表
 
-架构设计见 `design/Agent意图识别设计方案v3.md`（§5 类图、§8 数据表对接、§10 技术栈）。
+架构设计见 `docs/Agent意图识别设计方案v3.md`（§5 类图、§8 数据表对接、§10 技术栈）。
 
 ## 架构总览
 
@@ -227,6 +227,6 @@ self.recognizer = IntentRecognizer(
 
 ## 参考
 
-- `design/Agent意图识别设计方案v3.md`：v3 方案设计（类图 / 两阶段数据结构 / 数据表对接 / 技术栈）
+- `docs/Agent意图识别设计方案v3.md`：v3 方案设计（类图 / 两阶段数据结构 / 数据表对接 / 技术栈）
 - `memory/`：memory-system 包（嵌入、记忆治理、user_profiles 读写）
 - `agent_mvp/agent.py`：宿主接入示例与 ReAct 主循环
