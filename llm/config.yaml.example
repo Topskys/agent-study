@@ -1,0 +1,17 @@
+# LLM 模块配置模板：复制为 config.yaml 并填写
+# api_key 可用 ${ENV_VAR} 占位符，也可直接填写
+
+llm:
+  api_key: ${ZEN_API_KEY}
+  base_url: ${ZEN_BASE_URL}
+  provider: openai_compat        # openai_compat | http
+  temperature: 0.7
+  top_p: 0.95
+  max_tokens: 2048
+  timeout: 120
+  max_retries: 3
+  enable_cache: false
+  models:
+    default: ${ZEN_MODEL}
+    chat: ${ZEN_MODEL}
+    intent: ${ZEN_MODEL}

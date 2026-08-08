@@ -1,0 +1,25 @@
+[project]
+name = "llm-client"
+version = "0.1.0"
+description = "LLM 接入层：统一多模型调用接口（OpenAI 兼容 / 裸 HTTP）、重试、缓存、路由、审计"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.0.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llm_client"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.9.0",
+]
