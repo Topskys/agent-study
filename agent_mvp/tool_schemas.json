@@ -91,7 +91,7 @@
     "type": "function",
     "function": {
       "name": "tavily_search",
-      "description": "网页搜索，联网搜索实时信息（Tavily AI Search，专为 AI 优化，返回结构化结果与 AI 生成答案）。需要最新或模型训练数据之外的信息时调用。",
+      "description": "联网搜索实时信息（新闻、技术动态、不熟悉的知识等）。需要最新或模型训练数据之外的信息时调用。",
       "parameters": {
         "type": "object",
         "properties": {

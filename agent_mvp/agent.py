@@ -1,5 +1,9 @@
 """ReAct Agent（function calling 版），集成三层记忆 + 意图识别（v3 两阶段）。
 
+统一 LLM 接入层（llm-client 包）：
+- 所有模型调用走 `client.chat(LLMRequest(...))`，统一重试/缓存/路由/审计
+- ReAct 的 reason / 意图识别的 4 个注入回调全部转发到 llm_client
+
 ReAct = Reason + Act + Observe 的循环：
 - reason：调模型，让它决定下一步（输出答案或发起工具调用）
 - act：模型发起工具调用时，执行工具
@@ -22,6 +26,7 @@ ReAct = Reason + Act + Observe 的循环：
 - 数据访问层直连 agent_memory.db 现有记忆模块数据表
 
 模块划分：
+- llm-client        统一 LLM 接入层（外部包）
 - tool_schemas.json  工具 schema
 - tools.py           工具层：实现、分发
 - config.py          配置层：YAML 加载
@@ -32,11 +37,17 @@ ReAct = Reason + Act + Observe 的循环：
 
 import json
 import os
-import time
 import uuid
 from pathlib import Path
 
-from openai import OpenAI
+from llm_client import (
+    LLMClient,
+    LLMRequest,
+    LLMResponse,
+    Message,
+    ToolCall,
+    build_client,
+)
 
 from config import DEFAULT_CONFIG_PATH, load_config
 from intent_recognizer import ExecutionPlan, IntentNames, IntentRecognizer
@@ -62,6 +73,7 @@ class Agent:
         self,
         config: dict | None = None,
         config_path: str | os.PathLike = DEFAULT_CONFIG_PATH,
+        llm_client: LLMClient | None = None,
         llm_recognize=None,
         llm_extract_slots=None,
         ask_user=None,
@@ -75,17 +87,24 @@ class Agent:
         self.temperature = float(llm.get("temperature", 1.0))
         self.top_p = float(llm.get("top_p", 0.95))
         self.max_tokens = int(llm.get("max_tokens", 16384))
-        self.timeout = int(llm.get("timeout", 120))
+        self.timeout = float(llm.get("timeout", 120))
         self.max_retries = int(llm.get("max_retries", 3))
         self.max_rounds = int(cfg.get("agent", {}).get("max_rounds", 10))
         self.system_prompt = cfg.get("agent", {}).get("system_prompt")
 
-        self.client = OpenAI(
+        # 统一 LLM 客户端（可注入，默认按配置 build_client；含重试/缓存/路由/审计）
+        self.client = llm_client or build_client(
             api_key=self.api_key,
             base_url=self.base_url,
+            model=self.model or "",
+            provider=str(llm.get("provider", "openai_compat")),
             timeout=self.timeout,
+            max_retries=self.max_retries,
+            enable_cache=bool(llm.get("enable_cache", False)),
         )
-        self.memory: list = [{"role": "system", "content": self.system_prompt}]
+        self.memory: list[Message] = [
+            Message(role="system", content=self.system_prompt or "")
+        ]
 
         # ---------- 记忆系统 ----------
         mem = cfg.get("memory", {})
@@ -126,7 +145,9 @@ class Agent:
         self.user_memory.flush_working_memory()
         self.session_id = str(uuid.uuid4())
         self.user_memory.start_session(self.session_id)
-        self.memory = [{"role": "system", "content": self.system_prompt}]
+        self.memory = [
+            Message(role="system", content=self.system_prompt or "")
+        ]
         self._turn_inputs = []
 
     # ---------- 意图识别：LLM 回调注入 ----------
@@ -134,13 +155,12 @@ class Agent:
     def _llm_recognize(self, prompt: str, history: list[str]) -> str:
         """阶段一回调：意图模块已拼好 prompt，直接交给模型返回原始文本。"""
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=1000,
+            resp = self.client.chat(
+                LLMRequest.from_prompt(
+                    prompt, task="intent", temperature=0, max_tokens=1000
+                )
             )
-            return resp.choices[0].message.content or ""
+            return resp.content or ""
         except Exception as e:
             return f"[LLM错误: {e}]"
 
@@ -149,13 +169,12 @@ class Agent:
     ) -> str:
         """阶段二回调：批量槽位抽取。"""
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=1000,
+            resp = self.client.chat(
+                LLMRequest.from_prompt(
+                    prompt, task="intent", temperature=0, max_tokens=1000
+                )
             )
-            return resp.choices[0].message.content or ""
+            return resp.content or ""
         except Exception as e:
             return f"[LLM错误: {e}]"
 
@@ -163,18 +182,15 @@ class Agent:
         """预处理回调：短提问扩写。"""
         try:
             context = "".join(f"历史：{h}\n" for h in history[-3:])
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": _EXPAND_PROMPT.format(context=context, text=text),
-                    }
-                ],
-                temperature=0,
-                max_tokens=300,
+            resp = self.client.chat(
+                LLMRequest.from_prompt(
+                    _EXPAND_PROMPT.format(context=context, text=text),
+                    task="intent",
+                    temperature=0,
+                    max_tokens=300,
+                )
             )
-            return resp.choices[0].message.content or text
+            return resp.content or text
         except Exception as e:
             return f"[LLM错误: {e}]"
 
@@ -347,7 +363,10 @@ class Agent:
         这里按"中文约 0.6 token/字、其他字符约 0.25 token/字符"估算，仅供参考。
         """
         tool_json = json.dumps(TOOLS, ensure_ascii=False)
-        messages_json = json.dumps(self.memory, ensure_ascii=False)
+        messages_json = json.dumps(
+            [m.model_dump(exclude_none=True) for m in self.memory],
+            ensure_ascii=False,
+        )
         all_text = tool_json + messages_json
         cjk = sum(1 for c in all_text if "\u4e00" <= c <= "\u9fff")
         est_tokens = int(cjk * 0.6 + (len(all_text) - cjk) * 0.25)
@@ -359,57 +378,46 @@ class Agent:
             "max_tokens": self.max_tokens,
         }
 
-    def reason(self) -> object:
-        """Reason：调模型。返回 ChatCompletionMessage。"""
-        for attempt in range(self.max_retries + 1):
-            try:
-                resp = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=self.memory,
-                    tools=TOOLS,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    max_tokens=self.max_tokens,
-                )
-                return resp.choices[0].message
-            except Exception as e:
-                status = getattr(e, "status_code", None)
-                if attempt < self.max_retries and (
-                    status == 429 or (status and status >= 500)
-                ):
-                    wait = 2**attempt
-                    print(
-                        f"  [retry] {status} 服务繁忙，{wait}s 后重试（{attempt + 1}/{self.max_retries}）"
-                    )
-                    time.sleep(wait)
-                    continue
-                raise
-        raise RuntimeError("重试次数用尽")
+    def reason(self) -> LLMResponse:
+        """Reason：调模型。返回统一 LLMResponse。
 
-    def act(self, call) -> str:
+        重试由 llm_client 的 RetryPolicy 统一处理（429/5xx/网络错误指数退避），
+        这里只做组装与转发。
+        """
+        return self.client.chat(
+            LLMRequest(
+                messages=self.memory,
+                tools=TOOLS,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                max_tokens=self.max_tokens,
+                timeout=self.timeout,
+            )
+        )
+
+    def act(self, call: ToolCall) -> str:
         """Act：执行一个工具调用，返回观察结果。"""
-        fn = call.function
         try:
-            args = json.loads(fn.arguments or "{}")
+            args = json.loads(call.arguments or "{}")
         except json.JSONDecodeError:
             args = {}
-        result = run_tool(fn.name, args)
+        result = run_tool(call.name, args)
         try:
-            print(f"  [tool] {fn.name}({json.dumps(args, ensure_ascii=False)}) -> {result}")
+            print(f"  [tool] {call.name}({json.dumps(args, ensure_ascii=False)}) -> {result}")
         except UnicodeEncodeError:
             # Windows 控制台编码问题：截断输出
-            print(f"  [tool] {fn.name}({json.dumps(args, ensure_ascii=False)}) -> [输出含无法显示字符]")
+            print(f"  [tool] {call.name}({json.dumps(args, ensure_ascii=False)}) -> [输出含无法显示字符]")
         return result
 
-    def observe(self, call, result: str):
+    def observe(self, call: ToolCall, result: str):
         """Observe：把工具调用与结果写回记忆。"""
         self.memory.append(
-            {
-                "role": "tool",
-                "tool_call_id": call.id,
-                "name": call.function.name,
-                "content": result,
-            }
+            Message(
+                role="tool",
+                tool_call_id=call.id,
+                name=call.name,
+                content=result,
+            )
         )
 
     # ---------- 主循环 ----------
@@ -447,25 +455,25 @@ class Agent:
         question = plan.processed or user_input
         context = self._recall(question)
         self.memory.append(
-            {
-                "role": "user",
-                "content": self._build_user_content(context, plan, question),
-            }
+            Message(
+                role="user",
+                content=self._build_user_content(context, plan, question),
+            )
         )
         max_rounds = max_rounds or self.max_rounds
 
         for _ in range(max_rounds):
-            msg = self.reason()
+            resp = self.reason()
             self.memory.append(
-                {
-                    "role": "assistant",
-                    "content": msg.content,
-                    "tool_calls": msg.tool_calls,
-                }
+                Message(
+                    role="assistant",
+                    content=resp.content,
+                    tool_calls=resp.tool_calls,
+                )
             )
 
-            if not msg.tool_calls:
-                answer = msg.content or "（无输出）"
+            if not resp.tool_calls:
+                answer = resp.content or "（无输出）"
                 self._record(user_input, answer)
                 if (
                     plan.primary_intent == IntentNames.MEMORY_WRITE
@@ -474,7 +482,7 @@ class Agent:
                     self._persist(user_input)
                 return answer
 
-            for call in msg.tool_calls:
+            for call in resp.tool_calls:
                 result = self.act(call)
                 self.observe(call, result)
 
