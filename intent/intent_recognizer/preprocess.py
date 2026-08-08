@@ -12,8 +12,8 @@
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
 
 _RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 _DEFAULT_VOCAB_PATH = _RESOURCE_DIR / "business_vocab.json"
@@ -44,12 +44,12 @@ def _load_json(path: Path) -> dict:
         return json.load(f)
 
 
-def extract_entities_from_text(text: str, business_vocab: List[str]) -> List[str]:
+def extract_entities_from_text(text: str, business_vocab: list[str]) -> list[str]:
     """从单段文本提取实体：业务词命中 + 至多前 4 字修饰语。
 
     供 TextPreprocessService 与外部共用（轻量信号词，复杂指代靠 LLM 兜底）。
     """
-    entities: List[str] = []
+    entities: list[str] = []
     for word in sorted(business_vocab, key=len, reverse=True):
         idx = text.rfind(word)
         if idx == -1:
@@ -95,21 +95,21 @@ class TextPreprocessService:
 
     def __init__(
         self,
-        business_vocab: Optional[List[str]] = None,
+        business_vocab: list[str] | None = None,
         vocab_path: Path = _DEFAULT_VOCAB_PATH,
-        llm_expand: Optional[Callable[[str, List[str]], Optional[str]]] = None,
+        llm_expand: Callable[[str, list[str]], str | None] | None = None,
     ):
         if business_vocab is None:
             data = _load_json(vocab_path)
             business_vocab = data.get("business_vocab", [])
-        self.business_vocab: List[str] = list(business_vocab)
+        self.business_vocab: list[str] = list(business_vocab)
         self._llm_expand = llm_expand
 
     # ---------- 主流程 ----------
 
     def process(
-        self, text: str, history: Optional[List[str]] = None
-    ) -> Tuple[str, bool]:
+        self, text: str, history: list[str] | None = None
+    ) -> tuple[str, bool]:
         """预处理净化，返回 (净化后文本, 是否信息缺失/歧义)。"""
         history = history or []
         ambiguous = False
@@ -139,7 +139,7 @@ class TextPreprocessService:
         length = len(word)
         if length == 0:
             return text
-        result: List[str] = []
+        result: list[str] = []
         i = 0
         n = len(text)
         while i <= n - length:
@@ -158,8 +158,8 @@ class TextPreprocessService:
     # ---------- ② 代词消解 ----------
 
     def resolve_pronouns(
-        self, text: str, history: Optional[List[str]] = None
-    ) -> Tuple[str, bool]:
+        self, text: str, history: list[str] | None = None
+    ) -> tuple[str, bool]:
         """消解指物代词：从历史提取最近实体替换；无实体可消解 → 歧义。"""
         history = history or []
         entities = self.extract_entities(history)
@@ -174,10 +174,10 @@ class TextPreprocessService:
             resolved = self._replace_pronoun(resolved, pronoun, entities[0])
         return resolved, False
 
-    def extract_entities(self, history: Optional[List[str]] = None) -> List[str]:
+    def extract_entities(self, history: list[str] | None = None) -> list[str]:
         """从历史文本提取最近实体：业务词库命中 + 前缀修饰语。"""
         history = history or []
-        entities: List[str] = []
+        entities: list[str] = []
         for text in reversed(history):
             if not text:
                 continue
@@ -188,7 +188,7 @@ class TextPreprocessService:
 
     def _replace_pronoun(self, text: str, pronoun: str, entity: str) -> str:
         """替换代词为实体。代词后紧跟业务名词时不替换（避免"这个合同"变"合同合同"）。"""
-        result: List[str] = []
+        result: list[str] = []
         i = 0
         n = len(text)
         while i < n:
@@ -207,8 +207,8 @@ class TextPreprocessService:
     # ---------- ③ 短提问扩写 ----------
 
     def expand_short_query(
-        self, text: str, history: Optional[List[str]] = None
-    ) -> Tuple[str, bool]:
+        self, text: str, history: list[str] | None = None
+    ) -> tuple[str, bool]:
         """短提问扩写。守卫：len<5 且不匹配动作模式且无上下文时才扩写。
 
         返回 (扩写后文本, 是否仍歧义)。

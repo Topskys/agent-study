@@ -17,7 +17,7 @@
 """
 
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .ask_prompt import AskPromptService
 from .config import ConfigManager
@@ -25,7 +25,7 @@ from .depend import IntentDependService
 from .first_stage import FirstStageIntentService
 from .models import ExecutionPlan, FirstStageResult, IntentRecognizeItem, RuleHit
 from .preprocess import TextPreprocessService
-from .protocols import AskUser, LLMExtractSlots, LLMExpand, LLMRecognize, TaskExecutor
+from .protocols import AskUser, LLMExpand, LLMExtractSlots, LLMRecognize, TaskExecutor
 from .rule import RuleCheckService
 from .scheduler import TaskScheduleService
 from .second_stage import SecondStageSlotService
@@ -49,15 +49,15 @@ class IntentRecognizer:
 
     def __init__(
         self,
-        config: Optional[ConfigManager] = None,
-        db_path: Optional[str] = None,
-        llm_recognize: Optional[LLMRecognize] = None,
-        llm_extract_slots: Optional[LLMExtractSlots] = None,
-        ask_user: Optional[AskUser] = None,
-        llm_expand: Optional[LLMExpand] = None,
-        executor: Optional[TaskExecutor] = None,
+        config: ConfigManager | None = None,
+        db_path: str | None = None,
+        llm_recognize: LLMRecognize | None = None,
+        llm_extract_slots: LLMExtractSlots | None = None,
+        ask_user: AskUser | None = None,
+        llm_expand: LLMExpand | None = None,
+        executor: TaskExecutor | None = None,
         llm_timeout: float = 0,
-        high_risk_keywords: Optional[List[str]] = None,
+        high_risk_keywords: list[str] | None = None,
     ):
         self.kv = KvStore(db_path)
         self.config = config or ConfigManager(kv=self.kv)
@@ -96,7 +96,7 @@ class IntentRecognizer:
     def recognize(
         self,
         text: str,
-        history: Optional[List[str]] = None,
+        history: list[str] | None = None,
         user_id: str = _DEFAULT_USER,
         session_id: str = _DEFAULT_SESSION,
     ) -> ExecutionPlan:
@@ -285,7 +285,7 @@ class IntentRecognizer:
     def recognize_debug(
         self,
         text: str,
-        history: Optional[List[str]] = None,
+        history: list[str] | None = None,
         user_id: str = _DEFAULT_USER,
         session_id: str = _DEFAULT_SESSION,
     ) -> dict:
@@ -357,14 +357,14 @@ class IntentRecognizer:
             item.miss_slots = kept
             item.complete = not kept
         first.all_complete = all(i.complete for i in first.intent_list)
-        dedup: List[str] = []
+        dedup: list[str] = []
         for item in first.intent_list:
             for s in item.miss_slots:
                 if s not in dedup:
                     dedup.append(s)
         first.total_miss_slots = dedup
 
-    def _collect_slots(self, second, user_id: str, session_id: str) -> Dict[str, Any]:
+    def _collect_slots(self, second, user_id: str, session_id: str) -> dict[str, Any]:
         """阶段二结果 + 会话已缓存槽位合并，结构 {intent_id: {slot_key: value}}。"""
         merged = dict(self.store.read_slot_cache(user_id, session_id))
         for r in second.slot_results:
@@ -373,10 +373,10 @@ class IntentRecognizer:
         return merged
 
     def _order_intents_by_text(
-        self, intents: List[IntentRecognizeItem], text: str
-    ) -> List[IntentRecognizeItem]:
+        self, intents: list[IntentRecognizeItem], text: str
+    ) -> list[IntentRecognizeItem]:
         """按业务关键词在文本中的最早出现位置排序（供串行依赖解析）。"""
-        positions: Dict[str, int] = {}
+        positions: dict[str, int] = {}
         for it in intents:
             meta = self.config.get_intent(it.intent_id)
             pos = len(text) or 0
@@ -390,9 +390,9 @@ class IntentRecognizer:
     # ---------- 内部：风险 / 审计 ----------
 
     def _build_actions(
-        self, intents: List[IntentRecognizeItem], text: str
-    ) -> List[dict]:
-        actions: List[dict] = []
+        self, intents: list[IntentRecognizeItem], text: str
+    ) -> list[dict]:
+        actions: list[dict] = []
         for i, it in enumerate(intents):
             meta = self.config.get_intent(it.intent_id)
             actions.append(

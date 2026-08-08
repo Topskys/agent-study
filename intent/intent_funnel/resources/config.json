@@ -1,0 +1,166 @@
+{
+  "intents": [
+    {
+      "name": "phone_recharge",
+      "desc": "为指定手机号充值指定金额的话费",
+      "priority": 1,
+      "keywords": ["充值", "话费", "交话费", "充话费", "充"],
+      "required_slots": ["phone_number", "recharge_amount"],
+      "optional_slots": [],
+      "slots": [
+        {
+          "slot": "phone_number",
+          "slot_desc": "充值手机号",
+          "required": true,
+          "regex": "^1[0-9]{10}$"
+        },
+        {
+          "slot": "recharge_amount",
+          "slot_desc": "充值金额（元）",
+          "required": true,
+          "regex": "^[1-9][0-9]*([.][0-9]+)?$"
+        }
+      ]
+    },
+    {
+      "name": "bill_query",
+      "desc": "查询指定时间段内的消费账单",
+      "priority": 2,
+      "keywords": ["账单", "消费记录", "消费明细", "对账单"],
+      "required_slots": ["start_time"],
+      "optional_slots": ["end_time", "bill_type"],
+      "slots": [
+        {
+          "slot": "start_time",
+          "slot_desc": "起始时间",
+          "required": true,
+          "regex": ""
+        },
+        {
+          "slot": "end_time",
+          "slot_desc": "结束时间",
+          "required": false,
+          "regex": ""
+        },
+        {
+          "slot": "bill_type",
+          "slot_desc": "账单类型",
+          "required": false,
+          "regex": ""
+        }
+      ]
+    },
+    {
+      "name": "account_balance",
+      "desc": "查询账户当前余额",
+      "priority": 3,
+      "keywords": ["余额", "账户余额", "卡里还有多少钱", "多少钱"],
+      "required_slots": [],
+      "optional_slots": [],
+      "slots": []
+    },
+    {
+      "name": "book_flight",
+      "desc": "订购一张机票",
+      "priority": 4,
+      "keywords": ["机票", "订票", "订机票", "航班", "飞"],
+      "required_slots": ["destination"],
+      "optional_slots": ["departure", "date"],
+      "slots": [
+        {
+          "slot": "destination",
+          "slot_desc": "目的地",
+          "required": true,
+          "regex": "",
+          "aliases": {
+            "北京": "PEK",
+            "上海": "SHA",
+            "广州": "CAN",
+            "深圳": "SZX"
+          }
+        },
+        {
+          "slot": "departure",
+          "slot_desc": "出发地",
+          "required": false,
+          "regex": ""
+        },
+        {
+          "slot": "date",
+          "slot_desc": "出发日期",
+          "required": false,
+          "regex": ""
+        }
+      ]
+    },
+    {
+      "name": "send_email",
+      "desc": "给指定收件人发送一封邮件",
+      "priority": 5,
+      "keywords": ["邮件", "发邮件", "发送邮件", "email"],
+      "required_slots": ["recipient", "subject"],
+      "optional_slots": ["body"],
+      "slots": [
+        {
+          "slot": "recipient",
+          "slot_desc": "收件人邮箱",
+          "required": true,
+          "regex": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+        },
+        {
+          "slot": "subject",
+          "slot_desc": "邮件主题",
+          "required": true,
+          "regex": ""
+        },
+        {
+          "slot": "body",
+          "slot_desc": "邮件正文",
+          "required": false,
+          "regex": ""
+        }
+      ]
+    }
+  ],
+  "thresholds": {
+    "semantic_high": 0.9,
+    "llm_high": 0.9,
+    "llm_low": 0.6
+  },
+  "high_risk_keywords": ["删除", "删掉", "删", "清空", "清除", "群发", "外发", "注销", "永久", "kill"],
+  "tool_schemas": [
+    {
+      "function": "book_flight",
+      "description": "预订机票",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "destination": {"type": "string", "description": "目的地城市"},
+          "date": {"type": "string", "description": "出发日期"}
+        }
+      }
+    },
+    {
+      "function": "phone_recharge",
+      "description": "手机话费充值",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "phone_number": {"type": "string", "description": "手机号"},
+          "recharge_amount": {"type": "number", "description": "充值金额"}
+        }
+      }
+    },
+    {
+      "function": "bill_query",
+      "description": "查询消费账单",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "start_time": {"type": "string"},
+          "end_time": {"type": "string"}
+        }
+      }
+    }
+  ]
+}

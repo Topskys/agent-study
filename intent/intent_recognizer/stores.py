@@ -1,6 +1,6 @@
 """数据访问层：直连 agent_memory.db 现有记忆模块数据表。
 
-对齐 design/Agent意图识别设计方案v3.md §8 数据表对接设计：
+对齐 docs/Agent意图识别设计方案v2.md §8 数据表对接设计：
 - MemoryStore  -> memory_items   （intent_cache / slot_cache / long_term / session 读）
 - ProfileStore -> user_profiles
 - EventStore   -> event_stream
@@ -19,7 +19,7 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .models import FirstStageResult
 
@@ -31,14 +31,14 @@ def _now() -> str:
     return datetime.now().isoformat()
 
 
-def _loads(raw: Optional[str]) -> Any:
+def _loads(raw: str | None) -> Any:
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return {}
 
 
-def _connect(db_path: Optional[str]) -> Optional[sqlite3.Connection]:
+def _connect(db_path: str | None) -> sqlite3.Connection | None:
     if not db_path:
         return None
     return sqlite3.connect(db_path)
@@ -47,7 +47,7 @@ def _connect(db_path: Optional[str]) -> Optional[sqlite3.Connection]:
 class MemoryStore:
     """memory_items 读写：长期 / 会话 / 意图检查点 / 槽位缓存。"""
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         self.db_path = str(db_path) if db_path else None
         if self.db_path:
             self._init_db()
@@ -80,7 +80,7 @@ class MemoryStore:
 
     def read_memories(
         self, user_id: str, memory_type: str, limit: int = 20
-    ) -> List[dict]:
+    ) -> list[dict]:
         conn = _connect(self.db_path)
         if conn is None:
             return []
@@ -105,27 +105,27 @@ class MemoryStore:
             for r in rows
         ]
 
-    def read_long_term(self, user_id: str, limit: int = 20) -> List[dict]:
+    def read_long_term(self, user_id: str, limit: int = 20) -> list[dict]:
         return self.read_memories(user_id, "long_term", limit)
 
-    def read_session(self, user_id: str, limit: int = 20) -> List[dict]:
+    def read_session(self, user_id: str, limit: int = 20) -> list[dict]:
         return self.read_memories(user_id, "session", limit)
 
     def read_intent_cache(
         self, user_id: str, session_id: str
-    ) -> Optional[FirstStageResult]:
+    ) -> FirstStageResult | None:
         data = self._read_single(self._intent_cache_id(user_id, session_id))
         if not data:
             return None
         return FirstStageResult.from_dict(data)
 
-    def read_slot_cache(self, user_id: str, session_id: str) -> Dict[str, Any]:
+    def read_slot_cache(self, user_id: str, session_id: str) -> dict[str, Any]:
         data = self._read_single(self._slot_cache_id(user_id, session_id))
         if not isinstance(data, dict):
             return {}
         return data.get("slots", {})
 
-    def _read_single(self, memory_id: str) -> Optional[Any]:
+    def _read_single(self, memory_id: str) -> Any | None:
         conn = _connect(self.db_path)
         if conn is None:
             return None
@@ -154,7 +154,7 @@ class MemoryStore:
         )
 
     def write_slot_cache(
-        self, user_id: str, session_id: str, slots: Dict[str, Any]
+        self, user_id: str, session_id: str, slots: dict[str, Any]
     ) -> None:
         self._write_cache(
             self._slot_cache_id(user_id, session_id),
@@ -213,7 +213,7 @@ class MemoryStore:
 class ProfileStore:
     """user_profiles 读：返回用户上下文供消歧 / 槽位默认值。"""
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         self.db_path = str(db_path) if db_path else None
         if self.db_path:
             self._init_db()
@@ -240,7 +240,7 @@ class ProfileStore:
         finally:
             conn.close()
 
-    def get_profile(self, user_id: str) -> Dict[str, Any]:
+    def get_profile(self, user_id: str) -> dict[str, Any]:
         conn = _connect(self.db_path)
         if conn is None:
             return {}
@@ -270,7 +270,7 @@ class EventStore:
     EVENT_SLOT_EXTRACTED = "slot_extracted"
     EVENT_TASK_SCHEDULED = "task_scheduled"
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         self.db_path = str(db_path) if db_path else None
         if self.db_path:
             self._init_db()
@@ -311,7 +311,7 @@ class EventStore:
         finally:
             conn.close()
 
-    def list(self, user_id: str, limit: int = 20) -> List[dict]:
+    def list(self, user_id: str, limit: int = 20) -> list[dict]:
         conn = _connect(self.db_path)
         if conn is None:
             return []
@@ -338,7 +338,7 @@ class EventStore:
 class KvStore:
     """kv_items 读写：规则清单 / 配置覆盖，支持 TTL。"""
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None):
         self.db_path = str(db_path) if db_path else None
         if self.db_path:
             self._init_db()
@@ -359,7 +359,7 @@ class KvStore:
         finally:
             conn.close()
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         conn = _connect(self.db_path)
         if conn is None:
             return None
@@ -376,7 +376,7 @@ class KvStore:
             return None
         return _loads(value)
 
-    def set(self, key: str, value: Any, ttl: Optional[float] = None) -> None:
+    def set(self, key: str, value: Any, ttl: float | None = None) -> None:
         conn = _connect(self.db_path)
         if conn is None:
             return

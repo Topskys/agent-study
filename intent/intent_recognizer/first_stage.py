@@ -4,7 +4,6 @@
 仍失败则降级为规则关键词兜底；逐条过滤低置信意图（<0.6）并做槽位完备性校验。
 """
 
-from typing import List, Optional
 
 from .config import ConfigManager
 from .llm_json import call_with_timeout, parse_intent_array
@@ -21,8 +20,8 @@ class FirstStageIntentService:
     def __init__(
         self,
         config: ConfigManager,
-        rule: Optional[RuleCheckService] = None,
-        llm_recognize: Optional[LLMRecognize] = None,
+        rule: RuleCheckService | None = None,
+        llm_recognize: LLMRecognize | None = None,
         llm_timeout: float = 0,
     ):
         self.config = config
@@ -33,7 +32,7 @@ class FirstStageIntentService:
     # ---------- 主入口 ----------
 
     def recognize(
-        self, text: str, history: Optional[List[str]] = None
+        self, text: str, history: list[str] | None = None
     ) -> FirstStageResult:
         """阶段一识别。优先 LLM，失败回退规则关键词。"""
         items = self._llm_parse(text, history)
@@ -46,8 +45,8 @@ class FirstStageIntentService:
     # ---------- LLM 解析 ----------
 
     def _llm_parse(
-        self, text: str, history: Optional[List[str]]
-    ) -> List[IntentRecognizeItem]:
+        self, text: str, history: list[str] | None
+    ) -> list[IntentRecognizeItem]:
         if not self.llm_recognize:
             return []
         history = history or []
@@ -66,7 +65,7 @@ class FirstStageIntentService:
                 )
         return []
 
-    def _build_prompt(self, text: str, history: List[str]) -> str:
+    def _build_prompt(self, text: str, history: list[str]) -> str:
         lines = ["你是一个多意图识别器。根据用户输入与历史上下文，识别出全部意图。"]
         lines.append(
             "输出格式：JSON 数组，每个元素包含 intent_id / name / confidence(0~1) / "
@@ -88,9 +87,9 @@ class FirstStageIntentService:
         lines.append("只输出 JSON 数组，不要输出其他文字。")
         return "\n".join(lines)
 
-    def _normalize(self, parsed: List[dict]) -> List[IntentRecognizeItem]:
+    def _normalize(self, parsed: list[dict]) -> list[IntentRecognizeItem]:
         """过滤未知意图 / 低置信 / 重复，规整为 IntentRecognizeItem。"""
-        items: List[IntentRecognizeItem] = []
+        items: list[IntentRecognizeItem] = []
         seen = set()
         threshold = self.config.confidence_threshold
         for d in parsed:
@@ -131,9 +130,9 @@ class FirstStageIntentService:
 
     # ---------- 规则兜底 ----------
 
-    def rule_fallback(self, text: str) -> List[IntentRecognizeItem]:
+    def rule_fallback(self, text: str) -> list[IntentRecognizeItem]:
         """规则关键词兜底：命中任一意图关键词即产出该意图。"""
-        items: List[IntentRecognizeItem] = []
+        items: list[IntentRecognizeItem] = []
         seen = set()
         for m in self.config.get_all_intents():
             if any(k in text for k in m.keywords):
@@ -154,10 +153,10 @@ class FirstStageIntentService:
     # ---------- 完备性校验 ----------
 
     def check_completeness(
-        self, items: List[IntentRecognizeItem], source: str = "llm"
+        self, items: list[IntentRecognizeItem], source: str = "llm"
     ) -> FirstStageResult:
         """按配置必填槽位对齐完备性，汇总缺失槽位。"""
-        total_miss: List[str] = []
+        total_miss: list[str] = []
         all_complete = True
         for item in items:
             meta = self.config.get_intent(item.intent_id)
@@ -171,7 +170,7 @@ class FirstStageIntentService:
             if not item.complete:
                 all_complete = False
                 total_miss.extend(miss)
-        dedup: List[str] = []
+        dedup: list[str] = []
         for s in total_miss:
             if s not in dedup:
                 dedup.append(s)

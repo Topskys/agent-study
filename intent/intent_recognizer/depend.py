@@ -7,7 +7,6 @@
 意图顺序由上层按业务关键词在文本中的位置预排序后传入。
 """
 
-from typing import List
 
 from .models import IntentRecognizeItem, TaskGroup
 
@@ -19,8 +18,8 @@ class IntentDependService:
     """依赖解析：输出有序 TaskGroup 列表（串行分组带前置依赖）。"""
 
     def parse(
-        self, intents: List[IntentRecognizeItem], text: str = ""
-    ) -> List[TaskGroup]:
+        self, intents: list[IntentRecognizeItem], text: str = ""
+    ) -> list[TaskGroup]:
         if not intents:
             return []
         if len(intents) == 1:
@@ -35,7 +34,7 @@ class IntentDependService:
 
         # 串行：按文本出现次序排组，后序组依赖前序组
         ordered = sorted(intents, key=lambda it: self._first_pos(text, it))
-        groups: List[TaskGroup] = []
+        groups: list[TaskGroup] = []
         prev = None
         for idx, it in enumerate(ordered):
             dep = [prev] if prev is not None else []

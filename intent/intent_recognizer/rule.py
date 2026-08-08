@@ -7,7 +7,6 @@
 - assess_risk 供风险分级（high / mid / low），并入置信度折算。
 """
 
-from typing import List, Optional
 
 from .models import IntentNames, RuleHit
 
@@ -98,8 +97,8 @@ class RuleCheckService:
 
     MID_RISK_ACTIONS = ("修改", "发送", "导出", "写入", "覆盖", "移动")
 
-    def __init__(self, high_risk_keywords: Optional[List[str]] = None):
-        self.high_risk_keywords: List[str] = list(high_risk_keywords or [])
+    def __init__(self, high_risk_keywords: list[str] | None = None):
+        self.high_risk_keywords: list[str] = list(high_risk_keywords or [])
 
     # ---------- 主入口 ----------
 
@@ -161,7 +160,7 @@ class RuleCheckService:
 
         return RuleHit()
 
-    def assess_risk(self, text: str, actions: Optional[List[dict]] = None) -> str:
+    def assess_risk(self, text: str, actions: list[dict] | None = None) -> str:
         """风险分级：high（高危关键词）/ mid（写/发/导出等动作）/ low。"""
         if self._match_high_risk(text):
             return "high"
@@ -175,7 +174,7 @@ class RuleCheckService:
 
     # ---------- 私有匹配 ----------
 
-    def _match_high_risk(self, text: str) -> Optional[str]:
+    def _match_high_risk(self, text: str) -> str | None:
         for k in self.high_risk_keywords:
             if k in text:
                 return f"命中高危关键词：{k}"
@@ -199,7 +198,7 @@ class RuleCheckService:
             return True
         return False
 
-    def _match_tool(self, text: str) -> Optional[str]:
+    def _match_tool(self, text: str) -> str | None:
         for hint, tool in self.TOOL_HINTS:
             if hint in text:
                 return tool

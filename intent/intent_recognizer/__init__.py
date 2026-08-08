@@ -1,6 +1,6 @@
 """intent-recognizer 包（v3 两阶段多意图识别）。
 
-架构见 design/Agent意图识别设计方案v3.md：
+架构见 docs/Agent意图识别设计方案v2.md：
 - 两阶段 LLM：阶段一多意图识别（置信度/完备性）→ 阶段二批量槽位抽取；
 - LLM 能力全部注入式回调（llm_recognize / llm_extract_slots / ask_user / llm_expand），
   本包不 import 任何 LLM SDK；

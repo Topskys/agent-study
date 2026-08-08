@@ -6,8 +6,9 @@
 executor 为注入式执行回调；不注入则不实际执行（仅返回 pending 状态）。
 """
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 from .models import TaskGroup
 
@@ -17,20 +18,20 @@ class TaskScheduleService:
 
     def schedule(
         self,
-        groups: List[TaskGroup],
-        executor: Optional[Callable[[str, dict], Any]] = None,
-        slots: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        groups: list[TaskGroup],
+        executor: Callable[[str, dict], Any] | None = None,
+        slots: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """按依赖顺序调度执行，返回 {intent_id: 执行结果}。
 
         executor 为 None 时只返回分组结构，不实际执行（结果为 pending）。
         """
-        results: Dict[str, Any] = {}
+        results: dict[str, Any] = {}
         slots = slots or {}
         ordered = self._topological_order(groups)
 
         for group in ordered:
-            tasks: List[Tuple[str, dict]] = [
+            tasks: list[tuple[str, dict]] = [
                 (it.intent_id, slots.get(it.intent_id, {})) for it in group.intents
             ]
             if executor is None:
@@ -47,8 +48,8 @@ class TaskScheduleService:
         return results
 
     def run_parallel(
-        self, tasks: List[Tuple[str, dict]], executor: Callable
-    ) -> Dict[str, Any]:
+        self, tasks: list[tuple[str, dict]], executor: Callable
+    ) -> dict[str, Any]:
         """组内任务并发执行（保序收集结果）。"""
 
         def _do(item):
@@ -59,8 +60,8 @@ class TaskScheduleService:
             return dict(pool.map(_do, tasks))
 
     def run_serial(
-        self, tasks: List[Tuple[str, dict]], executor: Callable
-    ) -> List[Any]:
+        self, tasks: list[tuple[str, dict]], executor: Callable
+    ) -> list[Any]:
         """按顺序依次执行（供外部直接调用 / 测试）。"""
         return [executor(i, kv) for i, kv in tasks]
 
@@ -71,6 +72,6 @@ class TaskScheduleService:
             return {"error": str(e)}
 
     @staticmethod
-    def _topological_order(groups: List[TaskGroup]) -> List[TaskGroup]:
+    def _topological_order(groups: list[TaskGroup]) -> list[TaskGroup]:
         """按 group_id 升序稳定返回（依赖组的 group_id 更小）。"""
         return sorted(groups, key=lambda g: g.group_id)

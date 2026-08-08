@@ -1,547 +1,439 @@
-# Agent 意图识别设计方案（V3）—— 两阶段 LLM 多意图识别
+# Agent意图识别三层漏斗架构设计方案（合并 v3 优化点）
 
-> 版本：V3.0（两阶段 LLM 多意图识别，替代 v1/v2 单轮五维度并行方案；已按 intent/ 实际实现校验类图与数据表对接）
-> 状态：设计定稿
-> 定位：**独立模块** `intent/`，作为 agent_mvp 的依赖子模块接入，替换沿用 v1/v2 的单轮多模块并行方案
-> 技术栈：Python ≥ 3.11 + SQLite（sqlite3）+ memory-system（BGE/mock 嵌入）；**不绑定 LangGraph/LangChain 等重框架**，纯自研编排可落地
-> 适用范围：对话型 Agent、客服机器人、工具调用智能助手
-> 数据对接：复用 agent_mvp/agent_memory.db 现有记忆模块数据表（memory_items / user_profiles / memory_versions / event_stream / kv_items / graph_*），不新建会话表
+> 版本：V3.2 — 三层漏斗框架（规则→轻量语义→LLM）
+> 合并记录：
+> ① 相对 v3：低成本优先降本；三层输出完全同构；补齐 **槽位完备性 + 缺失聚合一次追问、槽位缓存与检查点、会话持久化、LLM 格式重试/规则降级、参数合法性校验、并行/串行编排预留**。
+> ② 相对 草稿.md：并入**完整 Mermaid 实现类图**（类/接口/关系）、`DialogStateTracker` 会话状态、`FunctionCallResolver / FunctionDefineSchema` 工具 Schema、`MatchRule` 规则定义，并将类图字段对齐至 V3 统一 JSON 模型。
 
----
+## 一、方案概述
+本方案采用**三层串行漏斗架构**实现AI Agent意图识别，遵循「低成本优先、逐级兜底、分层降噪」的设计思想。优先使用规则、轻量模型承载绝大多数流量，仅复杂长尾请求走大模型解析，极致平衡**推理成本、响应延迟与识别准确率**。
 
-## 目 录
-1. 整体需求概述
-2. 核心概念定义（意图、槽位、多意图依赖）
-3. 系统整体架构流程图
-4. 分层模块详细设计
-5. 完整模块类图（详细，含数据访问层）
-6. 两阶段标准数据结构
-7. 三种典型业务流转（单意图 / 多意图并行 / 多意图串行）
-8. 数据表对接设计（对齐现有记忆模块数据表）
-9. 规则兜底 & 异常容错
-10. 技术栈
-11. 适用场景与优劣总结
-12. 与 v2 的迁移说明
+架构完全支持**多意图识别 + 槽位抽取 + 槽位追问闭环**，三层模块输出结构完全统一，适配对话消解、参数补全、工具调用、人工兜底等全链路业务场景。
 
----
+## 二、模块最终命名（全局统一）
+**顶层调度模块**：IntentRecognition（意图识别总入口、漏斗路由调度）
 
-## 1. 整体需求概述
+**三层能力分层**
+1. **RuleMatcher**：前置规则匹配层
+2. **SemanticReasoner**：会话语义推理层
+3. **ComplexIntentParser**：LLM复杂意图解析层
 
-### 1.1 核心能力
-1. 解析用户自然语言，支持**单意图、一句话多意图**识别；
-2. **两阶段 LLM 调用拆分**：
-   - 阶段一：意图判定、置信度打分、槽位完备性校验、汇总缺失字段用于追问；
-   - 阶段二：已知目标意图集合，批量抽取各意图专属槽位参数；
-3. 自动区分意图依赖：无依赖并行执行、存在先后依赖串行执行；
-4. 缺失参数**统一聚合追问**，禁止逐字段反复询问；
-5. 会话上下文持久存储，对话中断可恢复进度；
-6. 规则引擎兜底，降低 LLM 幻觉、格式错误风险；
-7. **不绑定 LangGraph/LangChain**，纯自研逻辑可落地（Python）。
+命名规范：统一名词后缀（Matcher / Reasoner / Parser），风格一致、语义各司其职，工程可读性、可维护性极强。
 
-### 1.2 非功能要求
-- 结构化输出强约束，JSON 格式稳定；
-- 模块解耦：意图识别、槽位抽取、追问管理、任务调度可独立迭代；
-- 可扩展：新增业务意图仅靠配置，无需修改核心流程代码。
+## 三、核心流转策略（阈值定稿、业务分支固定）
+### 3.1 整体漏斗顺序
+用户输入 → **预处理清洗/敏感词过滤** → RuleMatcher（命中直接返回）→ 未命中进入 SemanticReasoner → 语义置信不足进入 ComplexIntentParser → 三层统一走**四分支交互兜底**
 
----
+四分支（任意一层输出的结果都收敛到同一套分支）：
+1. `maxConf ≥ 阈值` 且 **槽位完备**：直接执行
+2. `maxConf ≥ 阈值` 但 **必填槽位缺失**：`needAskSlots=true`，缺失槽位**一次聚合追问**
+3. 残留歧义（如 0.6~0.9）：`needDisambiguate=true`，消歧反问
+4. 无有效意图（<0.6）：`noValidIntent=true`，引导重新输入
 
-## 2. 核心概念定义
+### 3.2 分层阈值策略（固定不变）
+- **RuleMatcher**：命中即 1.0 置信度返回；未命中放行。
+- **SemanticReasoner 阈值：0.9**
+  - 最大置信度 ≥ 0.9：识别可信，进入槽位完备性检查（缺失 → 追问闭环），通过后更新会话状态并返回
+  - 最大置信度 ＜ 0.9：语义模糊，下放 LLM 解析层
+- **ComplexIntentParser 三段式阈值（核心分支）**
+  - ≥ 0.90：高置信有效意图，槽位完备则正常执行，缺失槽位则聚合追问
+  - 0.60 ~ 0.90：存在歧义，触发**消歧反问**（AskPromptBuilder 统一追问链路）
+  - ＜ 0.60：无有效意图，引导用户**重新输入**
 
-### 2.1 Intent 意图
-用户想要执行的一项独立业务任务；每个意图预先绑定：唯一标识、名称、业务描述、必填槽位列表、可选槽位列表。
-示例：话费充值、账单查询、发送邮件。
+> 槽位完备性检查在每层返回前执行：若意图命中但必填槽位缺失，则将该意图标记 `missSlots`，跨意图统一汇聚为一次追问，禁止逐字段骚扰（复用 v3 聚合追问思想）。
 
-### 2.2 Slot 槽位
-完成对应意图必须 / 可选的入参字段，依附于意图存在；无意图则无法确定需抽取哪些槽位。
+## 四、全局统一数据模型（支持多意图+槽位，三层同构）
+整套架构**三层输出完全同构**，调度器无需感知下层实现，天然支持多意图场景。
+统一输出采用 **snake_case JSON**，作为全链路通用消息结构：即使是中间态识别结果，也以 `from: "bot"` 的机器人消息形式统一吐给上层（含 SSE 流式），保证协议一致。
 
-### 2.3 意图完备状态
-- **已完备**：当前对话上下文可补齐该意图所有必填槽位；
-- **未完备**：缺失部分必填字段，需向用户发起追问收集。
+### 4.1 输入模型：UserRequest
+- content：用户文本内容
+- userId：用户唯一标识
+- sessionId：会话唯一标识
+- extraParamMap：扩展字段
 
-### 2.4 多意图依赖类型
-1. **并行无关意图**：多个任务互不影响，可同时执行；
-2. **串行依赖意图**：后序任务必须先依赖前序任务执行结果（含条件分支）。
-
----
-
-## 3. 系统整体架构流程
-
-```mermaid
-flowchart TD
-    A["用户输入文本"] --> B["输入预处理"]
-    B --> B1["清洗文本、过滤敏感词"]
-    B --> B2["读取会话历史上下文"]
-    B --> C["规则前置校验"]
-
-    C -->|"关键词 / 黑名单 / 硬规则"| D["阶段一 多意图解析"]
-
-    D --> D1["LLM 批量识别全部意图数组"]
-    D --> D2["置信度打分、槽位完备性校验"]
-    D --> D3["过滤低置信无效意图"]
-
-    D --> E{"分支决策中心"}
-
-    E -->|"存在未完备意图"| F["追问聚合模块"]
-    F --> G["统一追问话术（缺失字段一次问全）"]
-    G --> A
-
-    E -->|"全部意图参数完备"| H["意图依赖解析"]
-    H --> H1["区分并行 / 串行依赖"]
-    H --> I["第二阶 批量槽位抽取"]
-
-    I --> I1["分组 LLM 抽取每个意图 Slot"]
-    I --> I2["规则校验参数格式合法性"]
-    I --> J["任务调度执行中心"]
-    J --> J1["并行分发多任务同步运行"]
-    J --> J2["串行按依赖顺序依次调度"]
-    J --> K["工具 / 业务接口执行层"]
-    K --> L["结果汇总整理"]
-    L --> M["会话状态持久化（SQLite / pgvector）"]
-    M --> N["组装自然语言回复用户"]
+### 4.2 统一输出结构（JSON 定稿，三层通用）
+```json
+{
+  "text": "帮我订张去北京的机票",
+  "from": "bot",
+  "source_layer": "semantic_reasoner",
+  "need_disambiguate": false,
+  "no_valid_intent": false,
+  "intents": [
+    {
+      "name": "book_flight",
+      "confidence": 0.94,
+      "priority": 1,
+      "entities": [
+        {"entity": "destination", "value": "北京", "normalized_value": "PEK", "raw_text": "北京", "confidence": 0.99}
+      ]
+    }
+  ],
+  "intent_ranking": [
+    {"name": "book_flight", "confidence": 0.94},
+    {"name": "book_train", "confidence": 0.04}
+  ],
+  "session_id": "sess_123",
+  "request_id": "req_abc"
+}
 ```
 
-### 架构分层（自上而下）
-1. 接入层：用户交互输入输出
-2. 预处理 & 规则层：文本清洗、敏感拦截、规则兜底
-3. 一阶推理层：多意图识别 + 完备性判断（第一轮 LLM）
-4. 交互控制层：缺失参数追问流转
-5. 二阶推理层：槽位结构化抽取（第二轮 LLM）
-6. 任务编排层：串行 / 并行调度
-7. 业务执行层：工具调用、接口请求
-8. 存储层：会话状态、历史记录持久化（SQLite + pgvector）
+字段说明（对应实体 4.3/4.4）：
+- text：本次识别处理的文本（用户原句或预处理后文本）
+- from：消息来源，固定 `"bot"`——识别结果视为机器人产出，统一走 bot 消息管道（含 SSE）
+- sourceLayer：识别来源（rule_matcher / semantic_reasoner / complex_parser）
+- needDisambiguate：是否需要消歧反问
+- noValidIntent：是否无有效意图
+- **needAskSlots：是否缺槽位需聚合追问（可选扩展）**
+- **askSlots：缺失必填槽位列表，一次问全（可选扩展）**
+- **askPrompt：已生成的聚合追问话术（可选扩展）**
+- intentRanking：候选意图排序（供消歧 / 日志 / 评估）
+- sessionId / requestId：会话与请求链路标识（关联 trace）
 
----
+### 4.3 单意图单元：IntentItem
+- name：意图名称
+- confidence：该意图独立置信度
+- priority：意图优先级（多意图执行顺序参考）
+- entities：槽位列表 `List<EntityItem>`
+- **complete：该意图必填槽位是否完备（可选扩展）**
+- **missSlots：缺失必填槽位列表（用于聚合追问，可选扩展）**
 
-## 4. 分层模块详细设计
+### 4.4 槽位结构体：EntityItem
+- entity：槽位名称
+- value：解析结果值
+- **normalizedValue：规范化/归一化值（如 `北京 → PEK`，供工具直接消费）**
+- rawText：原文匹配片段
+- confidence：槽位抽取置信度
+- **valid：参数是否通过合法性校验（正则/枚举，可选扩展）**
 
-### 4.1 输入预处理（TextPreprocessService）
-清洗文本、去除噪声、过滤敏感词；读取会话历史作为上下文。
+## 五、各层级详细职责（最终落地版）
+### 5.1 RuleMatcher 前置规则匹配层
+**定位**：零算力开销、毫秒级响应，负责高频标准化流量削峰。
 
-### 4.2 规则前置校验引擎（RuleCheckService）
-- 关键词 / 黑名单 / 固定指令硬信号先行；命中高危关键词 → 直接拦截（规则, 不依赖 LLM）；
-- 作为 LLM 解析失败时的**兜底识别**回退。
+**能力**：关键词匹配、正则匹配、固定句式识别、静态槽位抽取、**高危词/阻断信号硬拦截**。
 
-### 4.3 阶段一：多意图解析（FirstStageIntentService）
-- 注入 `llm_recognize` 回调，批量识别意图数组；
-- 逐条置信度打分 + 槽位完备性校验；
-- 汇总 `missSlots`。
+**执行流程**
+1. 文本清洗归一化
+2. 敏感/高危信号硬拦截（最高优先级，不进入语义与 LLM）
+3. 按优先级批量匹配规则集（`MatchRule`：ruleId / regexPattern / keywordList / priorityLevel）
+4. 命中则生成意图、槽位，并按 `SlotCompletenessChecker` 补齐完备性信息后返回
+5. 无匹配放行至语义层
 
-### 4.4 调度器置信度三档分发（统一决策路由）
-- 高风险拦截先行：规则层命中高危关键词 → 直接拦截（不进入置信度路由）；
-- 中低风险并入置信度折算：单一路由口径，无独立风险闸门。
+**约束**：只处理**固定、无口语变体**的标准意图，不负责泛语义理解。
 
-| 置信度 | 分支 | 默认行为 |
-| ---- | ---- | ---- |
-| ＞ 0.9 | ① | **输出可执行计划** |
-| 0.6 ~ 0.9 | ② | 消歧反问用户 |
-| ＜ 0.6 | ③ | 请用户重新输入 |
+### 5.2 SemanticReasoner 会话语义推理层
+**定位**：系统主力识别层，承接常规会话流量，解决同义、指代、多轮省略问题。
 
-> 追问聚合（AskPromptService）与 0.6~0.9 消歧分支复用同一追问链路：缺失字段一次问全，禁止逐字段骚扰。
+**能力**：轻量模型分类、Embedding语义相似度匹配、会话状态 DST 推理（含槽位缓存回填）。
 
-### 4.5 追问控制层（AskPromptService）
-- 缺失 / 消歧字段**聚合为一条话术**，一次问全，禁止逐字段骚扰；
-- 追问回填后带缓存槽位重新走全流程。
+**执行流程**
+1. `DialogStateTracker.getSessionState(sessionId)` 读取会话状态，**回填已确认槽位与检查点**
+2. 上下文拼接推理（含历史 Query 与画像）
+3. 双路融合打分（模型分类 + 向量相似度 `SemanticSimilarMatcher`）
+4. 输出多意图结果
+5. 最高置信 ≥0.9：进入**槽位完备性检查**，缺失 → `needAskSlots` 聚合追问；完备 → 返回并 `updateDialogState`
+6. 最高置信 ＜0.9：语义不确定，下放LLM层
 
-### 4.6 意图依赖解析（IntentDependService）
-- 解析意图间并行 / 串行依赖关系，输出执行顺序分组。
+**约束**：只处理常规语句，超长/多诉求混行下放 LLM，避免小模型幻觉。
 
-### 4.7 二阶：槽位批量抽取（SecondStageSlotService）
-- 按意图（分批）调用 LLM 抽取各意图专属槽位；
-- 正则校验参数格式（手机号 / 时间 / 数字），非法值重新追问。
+### 5.3 ComplexIntentParser LLM复杂意图解析层
+**定位**：全链路兜底层，专门处理模糊、混杂、多诉求、超长、未知长尾Query。
 
-### 4.8 任务调度中心（TaskScheduleService）
-- 并行任务：并发执行同步运行；
-- 串行任务：按依赖顺序依次调度。
+**能力**：FunctionCall 复杂意图解析、多意图识别、复杂槽位抽取、结果合法性校验。
 
-### 4.9 会话状态持久化（数据访问层）
-- 复用 agent_memory.db 现有记忆模块数据表，**不新建会话 / 配置表**；
-- 会话历史 / 意图检查点 / 槽位缓存 → `memory_items`（以 `memory_type` 区分）；
-- 审计事件 → `event_stream`；规则 / 配置覆盖 → `kv_items`；用户画像 → `user_profiles`；
-- 语义召回复用 memory-system 嵌入与 `memory_items.embedding` 列（详见 §8）。
+**执行流程**
+1. 组装会话上下文 + 意图Schema + 工具定义Prompt（`FunctionDefineSchema`）
+2. **硬超时限流**调用大模型（`requestTimeoutMs`），防阻塞
+3. `FunctionCallResolver.resolveOutput` 解析输出，失败自动重试 2 次
+4. 解析仍失败 → **降级为规则层兜底**（`RuleMatcher` 回退）
+5. 槽位合法性校验（`EntityItem.valid`，正则/枚举），非法值纳入追问
+6. 按**四分支**收敛：
+   - ≥0.9 且槽位完备：正常交付
+   - ≥0.9 但需求槽位：聚合追问一次问全
+   - 0.6~0.9：需要歧义，消歧反问
+   - ＜0.6：无有效意图，引导重新输入
 
----
+**约束**：仅兜底使用，禁止全量流量打入，控制成本与延迟。
 
-## 5. 完整模块类图（详细，含数据访问层）
+## 六、业务流转流程图
+```mermaid
+flowchart TD
+    A[用户请求 UserRequest] --> A0[预处理清洗 / 敏感词过滤]
+    A0 --> B[RuleMatcher 前置规则匹配层]
+    B -->|命中（高危阻断）| X[直接拦截 / 拒绝]
+    B -->|命中且槽位完备| C[返回 IntentRecognitionResult]
+    B -->|命中但缺槽位| H[needAskSlots=true 聚合追问一次问全]
+    H --> A0
+    B -->|无匹配| D[SemanticReasoner 会话语义推理层]
+    D -->|maxConf≥0.90 且槽位完备| C
+    D -->|maxConf≥0.90 但缺槽位| H
+    D -->|maxConf＜0.90| E[ComplexIntentParser LLM复杂意图解析层]
 
-> intent 整体模块 = 门面编排 + 配置模型 + 预处理/规则 + 两阶段 LLM + 交互/调度 + 数据访问层。
-> 数据访问层直接对接现有记忆模块数据表（agent_memory.db），不新建会话表。
+    E -->|≥0.90 且槽位完备| C
+    E -->|≥0.90 但缺槽位| H
+    E -->|0.60≤maxConf＜0.90| F[needDisambiguate=true 发起消歧反问]
+    F --> A0
+    E -->|maxConf＜0.60| G[noValidIntent=true 引导重新输入]
 
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style A0 fill:#efe6ff,stroke:#333,stroke-width:2px
+    style B fill:#b7f0b7,stroke:#333,stroke-width:2px
+    style D fill:#b7c8f0,stroke:#333,stroke-width:2px
+    style E fill:#fff299,stroke:#333,stroke-width:2px
+    style C fill:#cccccc,stroke:#333,stroke-width:2px
+    style F fill:#ffdd77,stroke:#333,stroke-width:2px
+    style G fill:#ff9999,stroke:#333,stroke-width:2px
+    style H fill:#a8d8ff,stroke:#333,stroke-width:2px
+    style X fill:#ffb3b3,stroke:#333,stroke-width:2px
+```
+
+## 七、核心调度伪代码（最终定稿）
+```python
+def recognize_intent(request: UserRequest) -> IntentRecognitionResult:
+    # 0. 预处理 + 会话加载 & 槽位缓存回填
+    dialog_state = dialogTracker.getSessionState(request.sessionId)
+    request.filled_slots = dialogState.filledSlotMap  # 已确认槽位自动注入
+
+    # 1. 前置规则匹配优先
+    rule_result = intentRecognition.ruleMatcher.matchRequest(request)
+    if rule_result.intentList:
+        return _finalize(request, rule_result)   # 内含槽位完备性与缓存落盘
+
+    # 2. 会话语义推理处理常规 Query
+    semantic_result = intentRecognition.semanticReasoner.inferIntent(request)
+    if semantic_result.intentList:
+        max_conf = max(item.confidence for item in semantic_result.intentList)
+        if max_conf >= 0.90:
+            return _finalize(request, semantic_result)
+
+    # 3. LLM 复杂解析兜底
+    llm_result = intentRecognition.complexIntentParser.parseComplexIntent(request)
+    if not llm_result.intentList:
+        llm_result.noValidIntent = True
+        return _finalize(request, llm_result)
+
+    max_conf = max(item.confidence for item in llm_result.intentList)
+    if max_conf < 0.60:
+        llm_result.noValidIntent = True
+    elif 0.60 <= max_conf < 0.90:
+        llm_result.needDisambiguate = True
+    return _finalize(request, llm_result)
+
+
+def _finalize(request: UserRequest, result: IntentRecognitionResult) -> IntentRecognitionResult:
+    # 槽位完备性：扣除缓存回填后，跨意图聚合缺失槽位
+    missing = slotChecker.collectMissingSlots(result.intentList, request.filled_slots)
+    if missing:
+        result.needAskSlots = True
+        result.askSlots = missing
+        result.askPrompt = askPromptBuilder.build(missing)   # 一次问全
+    # 会话状态落盘（已确认槽位 / 检查点）
+    if result.intentList and not (result.noValidIntent or result.needDisambiguate):
+        dialogTracker.updateDialogState(request, result)
+    return result
+```
+
+## 八、会话状态与槽位缓存（DialogStateTracker）
+解决 **会话上下文持久化 + 已填槽位复用 + 中断恢复**（承接 v3 检查点/缓存思想，落地 V3 的 DST 能力）。
+
+**组件结构**（详见 §十 类图）
+- `DialogStateTracker`：会话状态管理者，`getSessionState(sessionId)` / `saveSessionState(...)` / `exportFilledSlots(...)`
+- `DialogSessionState`：会话快照，字段包括：
+  - `lastIntentText`：最近识别的意图
+  - `filledSlotMap`：已确认槽位字典（`Map<slotName, EntityItem>`）→ 识别前回填，避免重复询问
+  - `missSlotSet`：历史待补槽位
+  - `historicalQueryList`：近期用户原始输入（供消解、指代、语义召回）
+  - `checkpoint`：上次识别中间态 `IntentRecognitionResult`（中断后恢复进度）
+
+**读写时机**
+1. 每个请求进入语义/LLM 层前：读出会话并**回填缓存槽位**；
+2. 每层返回且发生槽位更新：`updateDialogState` 写入，回复后持久化；
+3. 多实例场景：会话状态外置（Redis / DB），保证横向扩展不丢状态。
+
+**槽位追问闭环（一次问全）**
+- `SlotCompletenessChecker.check(intents, filled)`：扣除已填槽位，输出缺失槽位 `askSlots`
+- `AskPromptBuilder.build(askSlots)`：跨意图聚合成一条话术（如"请补充：充值手机号、充值金额"）
+- 用户补全后携带缓存重新进入漏斗，避免重复询问
+
+## 九、鲁棒性与兜底
+1. **硬超时**：LLM 层设 `requestTimeoutMs`，超时快速失败，不阻塞整条链路；
+2. **输出格式兜底**：FunctionCall/JSON 解析失败自动重试 2 次 → 仍失败**降级为规则层**识别；
+3. **参数合法性校验**：`EntityItem.valid` 经正则/枚举校验，非法槽位转入追问，不直接执行；
+4. **槽位一致性**：执行层消费 `normalizedValue`，避免同义值/脏值入工具；
+5. **会话降级**：缓存读取失败或格式损坏 → 重建空会话，不抛异常。
+
+## 十、完整实现类图（Mermaid，字段对齐 V3 统一 JSON 模型）
 ```mermaid
 classDiagram
-    %% ========== 门面编排 ==========
-    class IntentRecognizer {
-        -preprocess : TextPreprocessService
-        -rule : RuleCheckService
-        -first_stage : FirstStageIntentService
-        -ask : AskPromptService
-        -depend : IntentDependService
-        -second_stage : SecondStageSlotService
-        -scheduler : TaskScheduleService
-        -store : MemoryStore
-        -profile : ProfileStore
-        -events : EventStore
-        -kv : KvStore
-        +recognize(text, history, user_id, session_id) ExecutionPlan
-        +recognize_debug(text, history, user_id, session_id) dict
+    %% ========== 入口调度 ==========
+    class IntentRecognition {
+        +RuleMatcher ruleMatcher
+        +SemanticReasoner semanticReasoner
+        +ComplexIntentParser complexIntentParser
+        +SlotCompletenessChecker slotChecker
+        +DialogStateTracker dialogTracker
+        +recognizeIntent(UserRequest request) IntentRecognitionResult
     }
 
-    %% ========== 配置与模型 ==========
-    class ConfigManager {
-        -intents : dict[str, IntentMeta]
-        -business_vocab : list[str]
-        -high_risk_keywords : list[str]
-        +load() void
-        +get_intent(intent_id) IntentMeta
-        +get_all_intents() list[IntentMeta]
-        +get_vocab() list[str]
-        +get_risk_keywords() list[str]
-        +confidence_threshold : float
-        +high_confidence_threshold : float
+    %% ========== 请求 / 响应模型 ==========
+    class UserRequest {
+        +String content
+        +String userId
+        +String sessionId
+        +Map~String,Object~ extraParamMap
     }
-    class IntentMeta {
-        +intent_id : str
-        +name : str
-        +desc : str
-        +keywords : list[str]
-        +required_slots : list[str]
-        +optional_slots : list[str]
-        +slots : list[SlotMeta]
+    class IntentRecognitionResult {
+        +String text
+        +String from
+        +String sourceLayer
+        +boolean needDisambiguate
+        +boolean noValidIntent
+        +boolean needAskSlots
+        +List~String~ askSlots
+        +String askPrompt
+        +List~IntentItem~ intents
+        +List~IntentRankingItem~ intentRanking
+        +String sessionId
+        +String requestId
     }
-    class SlotMeta {
-        +slot_key : str
-        +slot_desc : str
-        +required : bool
-        +regex : str
+    class IntentItem {
+        +String name
+        +float confidence
+        +int priority
+        +List~EntityItem~ entities
+        +boolean complete
+        +List~String~ missSlots
     }
-
-    %% ========== 预处理与规则 ==========
-    class TextPreprocessService {
-        -business_vocab : list[str]
-        -llm_expand : Callable|None
-        +process(text, history) tuple[str, bool]
-        +correct_typos(text) str
-        +resolve_pronouns(text, history) tuple[str, bool]
-        +expand_short_query(text, history) tuple[str, bool]
-        +extract_entities(history) list[str]
+    class EntityItem {
+        +String entity
+        +String value
+        +String normalizedValue
+        +String rawText
+        +float confidence
+        +boolean valid
     }
-    class RuleCheckService {
-        +check(text) RuleHit
-        +assess_risk(text, actions) str
-        -_match_high_risk(text) str|None
-        -_match_persist(text) bool
-        -_match_query(text) bool
-        -_match_tool(text) str|None
-    }
-    class RuleHit {
-        +intent_id : str|None
-        +confidence : float
-        +slots : dict
-        +actions : list[dict]
-        +blocked : bool
-        +block_reason : str|None
+    class IntentRankingItem {
+        +String name
+        +float confidence
     }
 
-    %% ========== 两阶段 LLM ==========
-    class FirstStageIntentService {
-        -llm_recognize : Callable|None
-        -config : ConfigManager
-        -rule : RuleCheckService
-        +recognize(text, history) FirstStageResult
-        -llm_parse(text, history) list[IntentRecognizeItem]
-        -rule_fallback(text) list[IntentRecognizeItem]
-        -check_completeness(items) FirstStageResult
+    %% ========== 第一层：规则匹配 ==========
+    class RuleMatcher {
+        +List~MatchRule~ ruleList
+        +matchRequest(UserRequest request) IntentRecognitionResult
+        +addMatchRule(MatchRule rule)
+        +removeMatchRule(String ruleId)
     }
-    class SecondStageSlotService {
-        -llm_extract_slots : Callable|None
-        -config : ConfigManager
-        +extract(text, history, intents) SecondStageResult
-        -validate(value, regex) bool
-    }
-
-    %% ========== 交互与调度 ==========
-    class AskPromptService {
-        +format_missing(result) str
-        +build_prompt(result) str
-        +build_confirm_prompt(intents) str
-        +build_invalid_prompt(invalid_slots) str
-        +ask(prompt, ask_user, timeout) str|None
-    }
-    class IntentDependService {
-        +parse(intents, text) list[TaskGroup]
-    }
-    class TaskScheduleService {
-        +schedule(groups, executor, slots) dict
-        +run_parallel(tasks, executor) dict
-        +run_serial(tasks, executor) list
-        -_run(intent_id, kv, executor) any
+    class MatchRule {
+        +String ruleId
+        +String targetIntentName
+        +Pattern regexPattern
+        +List~String~ keywordList
+        +int priorityLevel
+        +isTextMatch(String text) boolean
     }
 
-    %% ========== 数据访问层（对接现有记忆模块数据表）==========
-    class MemoryStore {
-        -db_path : str
-        +read_memories(user_id, memory_type, limit) list[dict]
-        +read_long_term(user_id, limit) list[dict]
-        +read_session(user_id, limit) list[dict]
-        +read_intent_cache(user_id, session_id) FirstStageResult|None
-        +read_slot_cache(user_id, session_id) dict
-        +write_intent_cache(user_id, session_id, result) void
-        +write_slot_cache(user_id, session_id, slots) void
+    %% ========== 第二层：语义推理 ==========
+    class SemanticReasoner {
+        +LightClassificationModel lightModel
+        +SemanticSimilarMatcher semanticMatcher
+        +DialogStateTracker dialogTracker
+        +float confidenceThreshold
+        +inferIntent(UserRequest request) IntentRecognitionResult
+        +updateDialogState(UserRequest request, IntentRecognitionResult result)
     }
-    class ProfileStore {
-        -db_path : str
-        +get_profile(user_id) dict
+    class LightClassificationModel {
+        +String modelStoragePath
+        +predictIntentProb(String text) Map~String,Float~
     }
-    class EventStore {
-        -db_path : str
-        +record(event_type, payload) void
-        +list(user_id, limit) list[dict]
+    class SemanticSimilarMatcher {
+        +Map~String,float[]~ intentEmbeddingMap
+        +queryTopSimilar(String text) List~IntentItem~
     }
-    class KvStore {
-        -db_path : str
-        +get(key) any|None
-        +set(key, value, ttl) void
-        +delete(key) void
+    class DialogStateTracker {
+        +Map~String,DialogSessionState~ sessionCache
+        +getSessionState(String sessionId) DialogSessionState
+        +saveSessionState(String sessionId, DialogSessionState state)
+        +exportFilledSlots(String sessionId) Map~String,EntityItem~
+    }
+    class DialogSessionState {
+        +String lastIntentText
+        +Map~String,EntityItem~ filledSlotMap
+        +Set~String~ missSlotSet
+        +List~String~ historicalQueryList
+        +IntentRecognitionResult checkpoint
     }
 
-    %% ========== 结果模型 ==========
-    class IntentRecognizeItem {
-        +intent_id : str
-        +name : str
-        +confidence : float
-        +complete : bool
-        +miss_slots : list[str]
+    %% ========== 槽位完备性与追问 ==========
+    class SlotCompletenessChecker {
+        +collectMissingSlots(List~IntentItem~ intents, Map~String,EntityItem~ filled) List~String~
     }
-    class FirstStageResult {
-        +intent_list : list[IntentRecognizeItem]
-        +all_complete : bool
-        +total_miss_slots : list[str]
-        +source : str
+    class AskPromptBuilder {
+        +build(List~String~ askSlots) String
     }
-    class SlotExtractResult {
-        +intent_id : str
-        +slot_kv : dict
+
+    %% ========== 第三层：LLM 解析 ==========
+    class ComplexIntentParser {
+        +BaseLlmClient llmClient
+        +FunctionCallResolver functionCallResolver
+        +int requestTimeoutMs
+        +parseComplexIntent(UserRequest request) IntentRecognitionResult
     }
-    class SecondStageResult {
-        +slot_results : list[SlotExtractResult]
-        +invalid_slots : list[dict]
+    class BaseLlmClient {
+        +String modelIdentifier
+        +syncGenerate(String prompt) String
     }
-    class TaskGroup {
-        +group_id : int
-        +dependency : list[int]
-        +intents : list[IntentRecognizeItem]
+    class FunctionCallResolver {
+        +List~FunctionDefineSchema~ schemaList
+        +resolveOutput(String llmRaw) List~IntentItem~
+        +parseRetry(String llmRaw, int maxRetry) List~IntentItem~
     }
-    class ExecutionPlan {
-        +intents : list[IntentRecognizeItem]
-        +slots : dict
-        +task_groups : list[TaskGroup]
-        +risk_level : str
-        +blocked : bool
-        +ambiguous : bool
-        +source : str
-        +original : str
-        +processed : str
-        +ask_prompt : str|None
-        +execution_results : dict
-        +primary_intent : str|None
+    class FunctionDefineSchema {
+        +String functionName
+        +String description
+        +Map~String,Object~ paramSchema
     }
 
     %% ========== 关系 ==========
-    IntentRecognizer --> ConfigManager
-    IntentRecognizer --> TextPreprocessService
-    IntentRecognizer --> RuleCheckService
-    IntentRecognizer --> FirstStageIntentService
-    IntentRecognizer --> AskPromptService
-    IntentRecognizer --> IntentDependService
-    IntentRecognizer --> SecondStageSlotService
-    IntentRecognizer --> TaskScheduleService
-    IntentRecognizer --> MemoryStore
-    IntentRecognizer --> ProfileStore
-    IntentRecognizer --> EventStore
-    IntentRecognizer --> KvStore
+    IntentRecognition --> UserRequest
+    IntentRecognition --> RuleMatcher
+    IntentRecognition --> SemanticReasoner
+    IntentRecognition --> ComplexIntentParser
+    IntentRecognition --> SlotCompletenessChecker
+    IntentRecognition --> DialogStateTracker
+    IntentRecognition --> IntentRecognitionResult
 
-    ConfigManager --> IntentMeta
-    IntentMeta --> SlotMeta
-    FirstStageIntentService --> ConfigManager
-    FirstStageIntentService --> RuleCheckService
-    SecondStageSlotService --> ConfigManager
-    FirstStageResult --> IntentRecognizeItem
-    ExecutionPlan --> IntentRecognizeItem
-    ExecutionPlan --> TaskGroup
-    TaskScheduleService --> TaskGroup
+    IntentRecognitionResult "1" --> "*" IntentItem : 多意图
+    IntentItem "1" --> "*" EntityItem
+    IntentRecognitionResult "1" --> "*" IntentRankingItem
 
-    MemoryStore ..> memory_items : SQL 读/写（memory_type=long_term/intent_cache/slot_cache）
-    ProfileStore ..> user_profiles : SQL 读（base_info/preferences/scene_profiles）
-    EventStore ..> event_stream : SQL 写（intent_recognized/ask_prompt/slot_extracted/task_scheduled）
-    KvStore ..> kv_items : SQL 读写（规则清单/配置覆盖）
-    MemoryStore ..> memory_system : generate_embedding（语义召回）
+    RuleMatcher "1" --> "*" MatchRule
+    MatchRule --> IntentItem
+
+    SemanticReasoner --> LightClassificationModel
+    SemanticReasoner --> SemanticSimilarMatcher
+    SemanticReasoner --> DialogStateTracker
+    DialogStateTracker "1" --> "*" DialogSessionState
+
+    ComplexIntentParser --> BaseLlmClient
+    ComplexIntentParser --> FunctionCallResolver
+    FunctionCallResolver "1" --> "*" FunctionDefineSchema
 ```
 
----
+## 十一、多意图并行/串行编排扩展（可选 · 识别后层）
+漏斗定位在"识别"，识别出的多意图交由上层编排：
+- `parseDependencies(intents)` 解析意图间并行/串行依赖（继承 v3 `IntentDependService`/`TaskGroup` 思想）；
+- **并行意图**：按 `priority` 并发分发至工具/业务执行层；
+- **串行意图**：前序结果写回 `DialogSessionState.filledSlotMap`，后续意图缺失槽位自动回填后继续。
+> 该编排作为适配层保留在识别层之外，不破坏三层漏斗内部结构。
 
-## 6. 两阶段标准数据结构
+## 十二、方案核心优势
+1. **分层解耦、成本最优**：规则扛高频、小模型扛主力、大模型扛长尾，大幅降低 LLM 调用量与延迟；
+2. **全层级同构、统一 JSON 输出**：`sourceLayer + intents + intentRanking + normalizedValue`，业务上层无需适配多套结构；
+3. **对话闭环完整**：正常执行 / 消歧反问 / **槽位缺失一次问全** / 无意图重输，覆盖全部对话场景；
+4. **会话可恢复**：槽位缓存 + 检查点，中断续聊不重复询问；
+5. **鲁棒容错**：超时、格式重试、规则降级、参数合法性校验，降低 LLM 幻觉影响；
+6. **工程规范极强**：统一命名 + 完整 Mermaid 类图 + 固定阈值，可直接用于开发落地与技术评审。
 
-### 6.1 第一阶段 LLM 输出（多意图数组）
-```json
-[
-  {"intent_id": "bill_query", "intent": "月度账单查询", "confidence": 0.96,
-   "complete": "参数已齐全", "miss_slots": []},
-  {"intent_id": "phone_recharge", "intent": "手机话费充值", "confidence": 0.94,
-   "complete": "缺失：phone_number、recharge_amount",
-   "miss_slots": ["phone_number", "recharge_amount"]}
-]
-```
-
-### 6.2 第二阶段槽位抽取输出
-```json
-[
-  {"intent_id": "bill_query",
-   "slot_info": {"start_time": "2026-07-01", "end_time": "2026-07-31", "bill_type": "消费账单"}},
-  {"intent_id": "phone_recharge",
-   "slot_info": {"phone_number": "13800138000", "recharge_amount": "50"}}
-]
-```
-
----
-
-## 7. 三种典型业务流转
-
-### 场景1：单意图 + 槽位缺失追问
-1. 用户：帮我充话费；
-2. 读取空会话 → 规则校验无风险；
-3. 一轮 LLM：话费充值意图，缺失手机号、金额；
-4. 聚合追问：请告诉我充值手机号和充值金额；
-5. 用户补充：13800138000，充 50；
-6. 重跑一轮识别：参数完全；
-7. 二轮 LLM 抽取全部槽位；
-8. 调度执行充值接口；
-9. 结果入库，恢复会话上下文。
-
-### 场景2：多意图并行无依赖
-用户：查 7 月账单 + 话费充 50
-1. 一轮识别两个独立意图，参数齐全；
-2. 依赖解析：并行任务；
-3. 二轮批量抽取两套槽位；
-4. 两个任务并发执行；
-5. 结果合并返回。
-
-### 场景3：串行依赖
-用户：先查账户余额，余额充足就充值 100 元
-1. LLM 识别先后依赖：查询余额 → 话费充值；
-2. 一轮校验参数齐全；二轮抽取槽位；
-3. 串行调度：先查余额，拿到结果后再充值；
-4. 全程状态写入会话。
-
----
-
-## 8. 数据表对接设计（对齐现有记忆模块数据表）
-
-> 原则：**不新建会话/检查点表**。意图模块所需的会话上下文、检查点、槽位缓存、审计日志
-> 全部落到 agent_mvp/agent_memory.db 现有记忆模块数据表中；语义召回复用 memory-system 的
-> BGE 嵌入与 `memory_items.embedding` 列，mock 模式（哈希向量）自动降级。
-
-### 8.1 现有数据表清单（agent_memory.db）
-
-| 表名 | 关键列 | 用途（记忆模块视角） |
-| ---- | ---- | ---- |
-| memory_items | memory_id / content / metadata(JSON) / memory_type / score / version / user_id / session_id / embedding | 记忆主表：long_term / session / working 三层记忆 |
-| user_profiles | user_id / base_info / preferences / scene_profiles / config / lock_keys / current_version / last_updated / embedding | 用户画像（基础信息、偏好、场景） |
-| memory_versions | version_id / memory_id / content / created_at | 记忆内容版本留痕 |
-| event_stream | event_id / event_type / payload(JSON) / timestamp | 事件流（memory_added 等审计事件） |
-| kv_items | key / value / expires_at | 键值对（规则清单、配置覆盖） |
-| graph_nodes / graph_edges | node_id / label / properties / relationship | 实体知识图谱（P2 槽位推导） |
-
-### 8.2 意图模块 ↔ 数据表映射
-
-| 意图模块存储需求 | 落表 | 读写方式 | 说明 |
-| ---- | ---- | ---- | ---- |
-| 会话上下文 / 历史 | memory_items | SQL 读（user_id + memory_type='session'） | 供代词消解、槽位回填、语义召回 |
-| 记忆查询短路 | memory_items | SQL 读（memory_type='long_term'） | memory_query 直查库，不调 LLM |
-| 阶段一意图结果缓存（checkpoint） | memory_items | SQL 写（memory_type='intent_cache'） | content=JSON(FirstStageResult)，按 user_id+session_id 唯一 |
-| 已填槽位缓存 | memory_items | SQL 写（memory_type='slot_cache'） | 聚合追问后累积，避免重复询问 |
-| 用户画像上下文（消歧/槽位默认值） | user_profiles | SQL 读 | base_info / preferences / scene_profiles |
-| 意图识别审计 | event_stream | SQL 写 | intent_recognized / ask_prompt / slot_extracted / task_scheduled |
-| 规则清单 / 配置覆盖 | kv_items | SQL 读写 | 高危关键词、意图配置可后台覆盖 |
-| 配置变更留痕 | memory_versions | SQL 写（P2） | 意图配置版本记录 |
-| 实体关系消歧 / 槽位推导 | graph_nodes / graph_edges | SQL 读写（P2） | 如"合同↔客户"关系辅助槽位填充 |
-
-### 8.3 数据访问层（stores.py）设计
-
-- **MemoryStore**：`memory_items` 读写。`read_long_term(user_id, limit)`、`read_intent_cache(user_id, session_id)`、`write_intent_cache(...)`、`read_slot_cache(...)`、`write_slot_cache(...)`、`read_memories(user_id, memory_type, limit)`。
-- **ProfileStore**：`user_profiles` 读。`get_profile(user_id) -> {base_info, preferences, scene_profiles, config}`，返回用户上下文供消歧。
-- **EventStore**：`event_stream` 写。`record(event_type, payload)`，统一审计入口。
-- **KvStore**：`kv_items` 读写。`get(key)` / `set(key, value, ttl)`，支持规则清单/配置覆盖。
-
-> 写入约定：**长期记忆写入仍走 memory-system 的 UserMemory.add_long_term_memory（治理裁决），
-> 意图模块只直接写内部检查点（intent_cache / slot_cache）与审计事件，不绕过记忆治理。**
-
-### 8.4 关键列约定
-
-- `memory_type` 扩展值：`intent_cache`（阶段一结果缓存）、`slot_cache`（已填槽位）；
-- `metadata` 约定：`{"importance":…, "role":"intent", "source":"first_stage|rule"}`；
-- `embedding`：写入检查点时同样计算语义向量，支持按语义召回历史意图（P2）。
-
----
-
-## 9. 规则兜底 & 异常容错
-
-1. **LLM 格式异常兜底**：输出非标准 JSON 自动重试 2 次；仍失败降级为规则关键词意图识别；
-2. **置信度阈值过滤**：统一阈值 0.6，低于直接丢弃，回复无法理解需求；
-3. **参数格式校验**：抽取后正则校验手机号 / 时间 / 数字，非法值重新追问；
-4. **重复槽位复用**：会话已填槽位永久缓存，无需用户重复提供；
-5. **超时控制**：两轮 LLM 均设超时，避免阻塞整条链路。
-
----
-
-## 10. 技术栈
-
-| 层 | 选型 | 说明 |
-| ---- | ---- | ---- |
-| 语言 | Python ≥ 3.11 | 与 agent_mvp / memory 一致 |
-| 构建/依赖 | uv + hatchling | 包名 `intent-recognizer`，editable 安装进 agent_mvp |
-| 存储 | SQLite（sqlite3 标准库） | 直连 agent_memory.db，复用现有表，零部署 |
-| 向量 | memory-system（BGE-small-zh-v1.5） | 复用 `generate_embedding` / `cosine_similarity`；`MEMORY_EMBED_MODE=mock` 哈希向量秒级降级 |
-| LLM | 注入式回调（宿主 agent_mvp 提供 openai client） | `llm_recognize`（阶段一）/ `llm_extract_slots`（阶段二）/ `ask_user`（追问）/ `llm_expand`（预处理），**intent 不 import openai** |
-| 框架 | 无（纯自研编排） | 不绑定 LangGraph / LangChain |
-| 测试 | pytest + mock 嵌入模式 | CI 秒级、确定性可回归 |
-| 配置 | resources/*.json + kv_items 覆盖 | 意图/槽位/词库/高危清单可后台配置 |
-
-> 依赖关系：`intent-recognizer -> memory-system`；`agent-mvp -> intent-recognizer`。
-
----
-
-## 11. 适用场景 & 优缺总结
-
-### 适用
-✅ 企业办公助手、在线客服、工具调用型 Agent、车载 / 智能家居语音助手
-✅ 一句话多需求、多轮对话、上百种业务意图的中台系统
-
-### 不适用
-❌ 纯知识库问答、闲聊陪伴机器人（无槽位无工具调用）
-❌ 毫秒级高吞吐物联网指令、风控系统（LLM 延迟过高）
-❌ 仅 1~2 个功能的极简小工具（架构过重）
-
-### 优点
-1. 两层解耦，意图识别 / 槽位抽取可分开优化；
-2. 天然支持多意图、并行 / 串行任务编排；
-3. 统一追问不反复骚扰用户；
-4. 无框架绑定、自研可控，可对接任意大模型；
-5. 会话持久化，中断可恢复。
-
-### 缺点
-1. 两次 LLM 调用，Token 消耗、延迟高于单轮；
-2. 需维护意图、槽位配置后台，前期基建有一定工作量。
-
----
-
-## 12. 与 v2 的迁移说明
-
-| 维度 | v2 | v3 |
-| ---- | ---- | ---- |
-| 核心模型 | 单轮五维度并行 + 调度器置信度三档 | **两阶段 LLM**：阶段一识别多意图，阶段二批量抽槽位 |
-| 多意图 | 规则/语义层近似 | 天然多意图数组 + 并行/串行依赖 |
-| 追问 | `ask_user` 单条补全 | 缺失字段聚合一次问全 + 槽位缓存复用 |
-| 槽位 | 隐性（action/target/slots） | 显式 IntentMeta/SlotMeta 配置驱动 |
-| 存储 | 内存态 ExecutionPlan | SQLite 会话持久化 + pgvector 语义召回 |
-| 兜底 | 规则五模块 | 规则引擎重试 2 次 + 关键词兜底 |
-
-> 复用：v2 的 `RuleModule`（高频硬信号）、`SafetyModule`（高风险拦截）、`Preprocessor`（错别字/代词）可迁移为 v3 的规则前置校验引擎；调度器保留置信度（并入风险折算），首档（＞0.9）直接返回可执行计划。
+> 已从 docs/草稿.md 合并：完整实现类图、`DialogStateTracker` 会话状态/槽位缓存、`FunctionCallResolver` 工具 Schema、`MatchRule` 规则定义，字段均对齐 V3 统一 JSON 模型。

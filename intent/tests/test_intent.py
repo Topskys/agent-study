@@ -1,6 +1,6 @@
 """intent-recognizer 包单测（v3 两阶段多意图识别）。
 
-覆盖（对应 design/Agent意图识别设计方案v3.md）：
+覆盖（对应 docs/Agent意图识别设计方案v2.md）：
 - 预处理三子模块：错别字 / 代词消解 / 短提问扩写
 - 规则层确定性：高危拦截 / memory_write / memory_query / chat / question / tool_use
 - 阶段一：LLM 多意图解析、置信度过滤、完备性校验、规则关键词兜底
@@ -15,16 +15,14 @@ from pathlib import Path
 
 os.environ.setdefault("MEMORY_EMBED_MODE", "mock")
 
-import pytest
 
 from intent_recognizer import (
-    ConfigManager,
     EventStore,
     ExecutionPlan,
     FirstStageResult,
     IntentNames,
-    IntentRecognizer,
     IntentRecognizeItem,
+    IntentRecognizer,
     MemoryStore,
 )
 from intent_recognizer.ask_prompt import AskPromptService
@@ -33,10 +31,8 @@ from intent_recognizer.depend import IntentDependService
 from intent_recognizer.first_stage import FirstStageIntentService
 from intent_recognizer.models import TaskGroup
 from intent_recognizer.preprocess import TextPreprocessService
-from intent_recognizer.rule import RuleCheckService
 from intent_recognizer.scheduler import TaskScheduleService
 from intent_recognizer.second_stage import SecondStageSlotService
-
 
 # ---------- 工具函数 ----------
 

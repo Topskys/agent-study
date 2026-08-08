@@ -7,7 +7,7 @@ ConfigManager 加载意图定义 / 业务词库 / 高危关键词 / 阈值；
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .models import IntentMeta, SlotMeta
 
@@ -23,10 +23,10 @@ class ConfigManager:
     def __init__(self, config_path: Path = _DEFAULT_CONFIG_PATH, kv=None):
         self.config_path = Path(config_path)
         self.kv = kv
-        self.intents: Dict[str, IntentMeta] = {}
-        self.business_vocab: List[str] = []
-        self.high_risk_keywords: List[str] = []
-        self.thresholds: Dict[str, Any] = {"confidence": 0.6, "high": 0.9}
+        self.intents: dict[str, IntentMeta] = {}
+        self.business_vocab: list[str] = []
+        self.high_risk_keywords: list[str] = []
+        self.thresholds: dict[str, Any] = {"confidence": 0.6, "high": 0.9}
         self.load()
 
     # ---------- 加载 ----------
@@ -43,8 +43,8 @@ class ConfigManager:
         self.thresholds.update(data.get("thresholds", {}))
         self._apply_kv_overrides()
 
-    def _build_intents(self, raw: List[dict]) -> List[IntentMeta]:
-        metas: List[IntentMeta] = []
+    def _build_intents(self, raw: list[dict]) -> list[IntentMeta]:
+        metas: list[IntentMeta] = []
         for item in raw:
             slots = [
                 SlotMeta(
@@ -81,16 +81,16 @@ class ConfigManager:
 
     # ---------- 查询 ----------
 
-    def get_intent(self, intent_id: str) -> Optional[IntentMeta]:
+    def get_intent(self, intent_id: str) -> IntentMeta | None:
         return self.intents.get(intent_id)
 
-    def get_all_intents(self) -> List[IntentMeta]:
+    def get_all_intents(self) -> list[IntentMeta]:
         return list(self.intents.values())
 
-    def get_vocab(self) -> List[str]:
+    def get_vocab(self) -> list[str]:
         return list(self.business_vocab)
 
-    def get_risk_keywords(self) -> List[str]:
+    def get_risk_keywords(self) -> list[str]:
         return list(self.high_risk_keywords)
 
     @property

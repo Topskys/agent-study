@@ -5,7 +5,6 @@
 """
 
 import re
-from typing import List, Optional
 
 from .config import ConfigManager
 from .llm_json import call_with_timeout, parse_slot_results
@@ -21,7 +20,7 @@ class SecondStageSlotService:
     def __init__(
         self,
         config: ConfigManager,
-        llm_extract_slots: Optional[LLMExtractSlots] = None,
+        llm_extract_slots: LLMExtractSlots | None = None,
         llm_timeout: float = 0,
     ):
         self.config = config
@@ -33,8 +32,8 @@ class SecondStageSlotService:
     def extract(
         self,
         text: str,
-        history: Optional[List[str]],
-        intents: List[IntentRecognizeItem],
+        history: list[str] | None,
+        intents: list[IntentRecognizeItem],
     ) -> SecondStageResult:
         if not intents or not self.llm_extract_slots:
             return SecondStageResult()
@@ -46,7 +45,7 @@ class SecondStageSlotService:
             lambda: self.llm_extract_slots(prompt, history, intent_ids),
             self.llm_timeout,
         )
-        parsed: List[dict] = []
+        parsed: list[dict] = []
         for attempt in range(_MAX_PARSE_RETRIES + 1):
             parsed = parse_slot_results(raw or "")
             if parsed:
@@ -57,8 +56,8 @@ class SecondStageSlotService:
                     self.llm_timeout,
                 )
 
-        results: List[SlotExtractResult] = []
-        invalid: List[dict] = []
+        results: list[SlotExtractResult] = []
+        invalid: list[dict] = []
         for d in parsed:
             intent_id = str(d.get("intent_id", "")).strip()
             slot_info = d.get("slot_info")
@@ -93,7 +92,7 @@ class SecondStageSlotService:
     # ---------- Prompt ----------
 
     def _build_prompt(
-        self, text: str, history: List[str], intents: List[IntentRecognizeItem]
+        self, text: str, history: list[str], intents: list[IntentRecognizeItem]
     ) -> str:
         lines = ["你是槽位抽取器。根据用户输入与历史上下文，为给定意图抽取槽位。"]
         lines.append(
