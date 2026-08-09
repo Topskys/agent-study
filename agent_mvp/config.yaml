@@ -10,6 +10,8 @@ llm:
   max_tokens: 16384
   timeout: 120
   max_retries: 3
+  # 流式输出：主循环 reason 逐 chunk、边收边打（DCE 体验）；关掉则一次性返回
+  stream: true
 
 agent:
   system_prompt: ${SYSTEM_PROMPT}
@@ -24,7 +26,8 @@ memory:
   session_importance: 0.8
 
 intent:
-  # v3 两阶段 LLM 识别（embedding/fuzzy 阈值已随 embedding 层移除）
+  # v3 三层漏斗意图识别（规则 → 语义 → LLM 兜底）+ 四分支交互
+  # 业务意图/槽位定义见 resources/intent_config.json；config_path 可覆盖
   confirm_timeout: 30
   highrisk_timeout: 60
 

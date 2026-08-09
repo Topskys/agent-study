@@ -155,6 +155,7 @@ class OpenAIProvider:
                     id=tc.id or "",
                     name=(tc.function.name if tc.function else "") or "",
                     arguments=(tc.function.arguments if tc.function else "") or "",
+                    index=tc.index or 0,
                 )
                 for tc in delta.tool_calls
             ]

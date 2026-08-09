@@ -5,7 +5,7 @@ description = "Agent MVP：统一 LLM 接入层(llm-client) + function calling +
 requires-python = ">=3.11"
 dependencies = [
     "memory-system[real]",
-    "intent-recognizer",
+    "intent-funnel",
     "llm-client",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0",
@@ -17,7 +17,7 @@ index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 [tool.uv.sources]
 memory-system = { path = "../memory", editable = true }
-intent-recognizer = { path = "../intent", editable = true }
+intent-funnel = { path = "../intent", editable = true }
 llm-client = { path = "../llm", editable = true }
 
 [dependency-groups]

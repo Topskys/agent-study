@@ -1,8 +1,8 @@
-"""ReAct Agent（function calling 版），集成三层记忆 + 意图识别（v3 两阶段）。
+"""ReAct Agent（function calling 版），集成三层记忆 + 意图识别（intent-funnel 三层漏斗）。
 
 统一 LLM 接入层（llm-client 包）：
 - 所有模型调用走 `client.chat(LLMRequest(...))`，统一重试/缓存/路由/审计
-- ReAct 的 reason / 意图识别的 4 个注入回调全部转发到 llm_client
+- ReAct 的 reason / 意图识别的注入回调（llm_gen / ask_user）全部转发到 llm_client
 
 ReAct = Reason + Act + Observe 的循环：
 - reason：调模型，让它决定下一步（输出答案或发起工具调用）
@@ -18,28 +18,34 @@ ReAct = Reason + Act + Observe 的循环：
   2. 模型自主：未命中关键词时，由模型判断是否调用 remember 工具
   由 _persisted_this_turn 标志防与 remember 工具双写
 
-意图识别（intent-recognizer 包，v3 两阶段多意图识别）：
-- 阶段一：多意图识别 + 置信度打分 + 槽位完备性校验
-- 阶段二：批量槽位抽取 + 参数格式校验
-- 缺失参数统一聚合追问（ask_prompt 一次问全），已填槽位缓存复用
-- 高风险拦截 / 中风险确认；规则硬信号短路（memory_write / memory_query 等）
-- 数据访问层直连 agent_memory.db 现有记忆模块数据表
+意图识别（intent-funnel 包，V3 三层漏斗）：
+- 三层串行漏斗：RuleMatcher（规则）→ SemanticReasoner（语义）→ ComplexIntentParser（LLM）
+- 四分支交互兜底：直接执行 / 缺失槽位聚合追问(need_ask_slots) / 消歧反问(need_disambiguate) / 重输(no_valid_intent)
+- 高风险关键词硬拦截（blocked）；会话槽位经 SessionStore 缓存复用
+- 自定义 resources/intent_config.json：内置业务意图 + memory_write / memory_query 记忆意图
 
 模块划分：
 - llm-client        统一 LLM 接入层（外部包）
 - tool_schemas.json  工具 schema
 - tools.py           工具层：实现、分发
 - config.py          配置层：YAML 加载
-- intent-recognizer  意图识别（外部包）
+- intent-funnel     意图识别三层漏斗（外部包）
 - memory_system      记忆层（外部包）
 - agent.py           ReAct 循环 + 入口
 """
 
 import json
 import os
+import sqlite3
 import uuid
 from pathlib import Path
 
+from intent_funnel import (
+    FunnelConfig,
+    FunnelIntentRecognition,
+    IntentResult,
+    SessionStore,
+)
 from llm_client import (
     LLMClient,
     LLMRequest,
@@ -50,17 +56,14 @@ from llm_client import (
 )
 
 from config import DEFAULT_CONFIG_PATH, load_config
-from intent_recognizer import ExecutionPlan, IntentNames, IntentRecognizer
 from memory_system.core.memory_system import MemorySystem
 from tools import TOOLS, run_tool, set_bing_search_key, set_memory_persist_hook, set_tavily_search_key
 
-# LLM 短提问扩写 prompt：补全信息、不改变原意（意图预处理阶段使用）
-_EXPAND_PROMPT = (
-    "用户这句请求不完整或有歧义，请扩写成信息完整的请求。\n"
-    "要求：只输出扩写后的句子，补充合理细节、不改变原意；不需要扩写就原样返回。\n"
-    "{context}"
-    "用户输入：{text}"
-)
+# 系统级意图常量（与 resources/intent_config.json 的意图名对齐）
+class IntentNames:
+    MEMORY_WRITE = "memory_write"
+    MEMORY_QUERY = "memory_query"
+    CHAT = "chat"
 
 # 追问循环上限：防止因 ask_user 一直给空回复而无限循环
 _MAX_INTERACT_ROUNDS = 3
@@ -74,10 +77,8 @@ class Agent:
         config: dict | None = None,
         config_path: str | os.PathLike = DEFAULT_CONFIG_PATH,
         llm_client: LLMClient | None = None,
-        llm_recognize=None,
-        llm_extract_slots=None,
+        llm_gen=None,
         ask_user=None,
-        llm_expand=None,
     ):
         cfg = config or load_config(config_path)
         llm = cfg.get("llm", {})
@@ -89,6 +90,7 @@ class Agent:
         self.max_tokens = int(llm.get("max_tokens", 16384))
         self.timeout = float(llm.get("timeout", 120))
         self.max_retries = int(llm.get("max_retries", 3))
+        self.stream = bool(llm.get("stream", True))
         self.max_rounds = int(cfg.get("agent", {}).get("max_rounds", 10))
         self.system_prompt = cfg.get("agent", {}).get("system_prompt")
 
@@ -124,20 +126,24 @@ class Agent:
         set_bing_search_key(cfg.get("tools", {}).get("bing_search_api_key", ""))
         set_tavily_search_key(cfg.get("tools", {}).get("tavily_api_key", ""))
 
-        # ---------- 意图识别（独立模块，v3 两阶段） ----------
+        # ---------- 意图识别（intent-funnel 三层漏斗） ----------
         intent_cfg = cfg.get("intent", {})
         safety_cfg = cfg.get("safety", {})
         self.confirm_timeout = int(intent_cfg.get("confirm_timeout", 30))
         self.highrisk_timeout = int(intent_cfg.get("highrisk_timeout", 60))
-        self.recognizer = IntentRecognizer(
-            db_path=self.memory_system.vector_store.db_path,
-            llm_recognize=llm_recognize or self._llm_recognize,
-            llm_extract_slots=llm_extract_slots or self._llm_extract_slots,
-            ask_user=ask_user or self._ask_user,
-            llm_expand=llm_expand or self._llm_expand,
+        funnel_cfg_path = cfg.get("intent", {}).get("config_path") or str(
+            Path(__file__).resolve().parent / "resources" / "intent_config.json"
+        )
+        self.recognizer = FunnelIntentRecognition(
+            config=FunnelConfig(config_path=funnel_cfg_path),
+            store=SessionStore(db_path=self.memory_system.vector_store.db_path),
+            llm_gen=llm_gen or self._llm_gen,
+            llm_timeout=float(self.timeout),
             high_risk_keywords=safety_cfg.get("high_risk_keywords"),
         )
+        self.ask_user = ask_user or self._ask_user
         self._turn_inputs: list[str] = []
+        self._stream_last_printed = False
 
     def reset(self):
         """清空对话与工作记忆，把当前会话沉淀进长期记忆，开启新会话。"""
@@ -152,8 +158,8 @@ class Agent:
 
     # ---------- 意图识别：LLM 回调注入 ----------
 
-    def _llm_recognize(self, prompt: str, history: list[str]) -> str:
-        """阶段一回调：意图模块已拼好 prompt，直接交给模型返回原始文本。"""
+    def _llm_gen(self, prompt: str) -> str:
+        """漏斗 LLM 层回调：已拼好 prompt，直接交模型返回原始文本（期望意图 JSON）。"""
         try:
             resp = self.client.chat(
                 LLMRequest.from_prompt(
@@ -161,36 +167,6 @@ class Agent:
                 )
             )
             return resp.content or ""
-        except Exception as e:
-            return f"[LLM错误: {e}]"
-
-    def _llm_extract_slots(
-        self, prompt: str, history: list[str], intent_ids: list[str]
-    ) -> str:
-        """阶段二回调：批量槽位抽取。"""
-        try:
-            resp = self.client.chat(
-                LLMRequest.from_prompt(
-                    prompt, task="intent", temperature=0, max_tokens=1000
-                )
-            )
-            return resp.content or ""
-        except Exception as e:
-            return f"[LLM错误: {e}]"
-
-    def _llm_expand(self, text: str, history: list[str]) -> str:
-        """预处理回调：短提问扩写。"""
-        try:
-            context = "".join(f"历史：{h}\n" for h in history[-3:])
-            resp = self.client.chat(
-                LLMRequest.from_prompt(
-                    _EXPAND_PROMPT.format(context=context, text=text),
-                    task="intent",
-                    temperature=0,
-                    max_tokens=300,
-                )
-            )
-            return resp.content or text
         except Exception as e:
             return f"[LLM错误: {e}]"
 
@@ -268,33 +244,32 @@ class Agent:
 
     def _resolve_plan(
         self,
-        plan: ExecutionPlan,
+        plan: IntentResult,
         history: list[str],
         user_input: str,
-    ) -> ExecutionPlan:
-        """追问 / 消歧 / 拦截提示回灌：ask_user 一问，回复后重新识别。
+    ) -> IntentResult:
+        """追问 / 消歧 / 重述回灌：ask_user 一问，回复后重新识别。
 
-        覆盖 v3 三档分发与聚合追问：plan.ask_prompt 承载"缺失槽位 / 消歧 /
-        低置信重述"等所有主动交互话术；回复作为新一轮输入重走全流程，
-        已填槽位经 slot_cache 自动累积。
+        覆盖漏斗四分支交互兜底：plan.ask_prompt 承载"缺失槽位 / 消歧 /
+        重述"等所有主动交互话术；回复作为新一轮输入重走全流程，
+        已填槽位经 SessionStore 会话缓存自动累积。
 
-        无意图重述（低置信 <0.6）特殊处理：只问一次；重述后仍识别不出
+        无意图重述（no_valid_intent）特殊处理：只问一次；重述后仍识别不出
         任何意图，说明输入本就不是受支持的业务操作，停止追问、交由通用
         对话兜底，避免"请换一种说法重新输入"循环把用户卡住。
         """
         no_intent_asked = False
         for _ in range(_MAX_INTERACT_ROUNDS):
-            if plan.blocked or not (
-                plan.ambiguous and plan.ask_prompt and self.recognizer.ask_user
-            ):
+            ambiguous = (
+                plan.need_ask_slots or plan.need_disambiguate or plan.no_valid_intent
+            )
+            if plan.blocked or not (ambiguous and plan.ask_prompt and self.ask_user):
                 break
             if not plan.intents:
                 if no_intent_asked:
                     break
                 no_intent_asked = True
-            reply = self.recognizer.ask_user(
-                plan.ask_prompt, float(self.confirm_timeout)
-            )
+            reply = self.ask_user(plan.ask_prompt, float(self.confirm_timeout))
             if not reply or not reply.strip():
                 break
             plan = self.recognizer.recognize(
@@ -302,28 +277,13 @@ class Agent:
             )
             print(
                 f"  [intent] 补全后 primary={plan.primary_intent} "
-                f"src={plan.source} amb={plan.ambiguous}"
+                f"src={plan.source_layer} amb={plan.need_ask_slots or plan.need_disambiguate}"
             )
             if not plan.intents:
                 break
         return plan
 
-    def _confirm_mid_risk(self, plan: ExecutionPlan) -> bool:
-        """中风险操作确认：无交互回调（API 场景）默认执行。"""
-        names = "、".join(i.name for i in plan.intents) or plan.primary_intent or "未知"
-        prompt = f"  [安全] 中风险操作（{names}），确认执行吗？(y/n) "
-        if not self.recognizer.ask_user:
-            return True
-        reply = self.recognizer.ask_user(prompt, float(self.confirm_timeout))
-        return reply is not None and reply.strip().lower() in (
-            "y",
-            "yes",
-            "是",
-            "确定",
-            "确认",
-        )
-
-    def _block_high_risk(self, plan: ExecutionPlan) -> str:
+    def _block_high_risk(self, plan: IntentResult) -> str:
         """高风险操作拦截回复。"""
         print("  [安全] 已拦截高风险操作")
         return plan.ask_prompt or (
@@ -333,24 +293,37 @@ class Agent:
 
     def _answer_memory_query(self) -> str:
         """记忆查询短路：直查库（memory_items 表 long_term），不调 LLM。"""
-        rows = self.recognizer.store.read_long_term(self.user_id, self.memory_top_k)
+        db_path = self.memory_system.vector_store.db_path
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT content FROM memory_items WHERE user_id=? AND memory_type='long_term' "
+                "ORDER BY created_at DESC LIMIT ?",
+                (self.user_id, self.memory_top_k),
+            ).fetchall()
+        finally:
+            conn.close()
         if not rows:
             return "我当前还没有记住什么长期信息。"
-        lines = [f"- {r['content']}" for r in rows]
+        lines = [f"- {r[0]}" for r in rows]
         return "我记住的信息：\n" + "\n".join(lines)
 
     def _build_user_content(
-        self, context: str | None, plan: ExecutionPlan, user_input: str
+        self, context: str | None, plan: IntentResult, user_input: str
     ) -> str:
         """把意图识别结果注入用户消息，帮助模型聚焦执行。"""
         intents_desc = (
             "、".join(f"{i.name}({i.confidence:.2f})" for i in plan.intents) or "未知"
         )
-        hint = f"用户意图识别: {intents_desc}（风险等级: {plan.risk_level}）"
-        if plan.slots:
-            hint += f"；槽位: {json.dumps(plan.slots, ensure_ascii=False)}"
-        if plan.processed and plan.processed != user_input:
-            hint += f"；净化后输入: {plan.processed}"
+        hint = f"用户意图识别: {intents_desc}（层级: {plan.source_layer}）"
+        slots = {
+            item.name: {e.intent: e.value for e in item.entities if e.valid}
+            for item in plan.intents
+        }
+        if slots:
+            hint += f"；槽位: {json.dumps(slots, ensure_ascii=False)}"
+        if plan.text and plan.text != user_input:
+            hint += f"；净化后输入: {plan.text}"
         body = f"{hint}\n\n用户问题：{user_input}"
         return f"{context}\n\n{body}" if context else body
 
@@ -379,20 +352,59 @@ class Agent:
         }
 
     def reason(self) -> LLMResponse:
-        """Reason：调模型。返回统一 LLMResponse。
+        """Reason：调模型。返回聚合后的完整 LLMResponse。
 
-        重试由 llm_client 的 RetryPolicy 统一处理（429/5xx/网络错误指数退避），
-        这里只做组装与转发。
+        - stream=True：逐 chunk 接收，content 边接收边打印（DCE 输出体验）
+        - 流式 tool_calls 按 index 归并增量分片，拼成完整 ToolCall
+        - 重试由 llm_client 的 RetryPolicy 统一处理（429/5xx/网络错误指数退避），
+          非流式路径走 RetryPolicy；流式不可断点重试，失败直接上抛
         """
-        return self.client.chat(
-            LLMRequest(
-                messages=self.memory,
-                tools=TOOLS,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                max_tokens=self.max_tokens,
-                timeout=self.timeout,
-            )
+        req = LLMRequest(
+            messages=self.memory,
+            tools=TOOLS,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            max_tokens=self.max_tokens,
+            timeout=self.timeout,
+        )
+        if not self.stream:
+            resp = self.client.chat(req)
+            if resp.content:
+                print(f"Agent: {resp.content}")
+                self._stream_last_printed = True
+            return resp
+
+        content_parts: list[str] = []
+        calls: dict[int, ToolCall] = {}
+        finish_reason = None
+        content_printed = False
+        for chunk in self.client.chat_stream(req):
+            if chunk.content:
+                if not content_printed:
+                    print("Agent: ", end="", flush=True)
+                    content_printed = True
+                content_parts.append(chunk.content)
+                print(chunk.content, end="", flush=True)
+            if chunk.tool_calls:
+                for tc in chunk.tool_calls:
+                    cur = calls.get(tc.index)
+                    if cur is None:
+                        calls[tc.index] = tc
+                    else:
+                        cur.id = cur.id or tc.id
+                        cur.name = (cur.name or "") + (tc.name or "")
+                        cur.arguments = (cur.arguments or "") + (tc.arguments or "")
+            if chunk.finish_reason:
+                finish_reason = chunk.finish_reason
+        if content_printed:
+            print()  # 流式输出结束补换行
+        tool_calls = [calls[i] for i in sorted(calls)] or None
+        self._stream_last_printed = content_printed
+        return LLMResponse(
+            content="".join(content_parts) or None,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            model=self.model or "",
         )
 
     def act(self, call: ToolCall) -> str:
@@ -425,15 +437,17 @@ class Agent:
     def run(self, user_input: str, max_rounds: int | None = None) -> str:
         self._turn_inputs.append(user_input)
         self._persisted_this_turn = False
+        self._stream_last_printed = False
 
-        # ① 意图识别（预处理 + 规则前置 + 两阶段 LLM + 风险分级）
+        # ① 意图识别（三层漏斗：规则 → 语义 → LLM + 主动交互分支）
         history = self._recent_user_history()[:-1]
         plan = self.recognizer.recognize(
             user_input, history, self.user_id, self.session_id
         )
         print(
-            f"  [intent] primary={plan.primary_intent} src={plan.source} "
-            f"risk={plan.risk_level} amb={plan.ambiguous} blocked={plan.blocked}"
+            f"  [intent] primary={plan.primary_intent} src={plan.source_layer} "
+            f"blocked={plan.blocked} ask_slots={plan.need_ask_slots} "
+            f"disamb={plan.need_disambiguate} no_intent={plan.no_valid_intent}"
         )
 
         # ② 主动交互：缺失槽位 / 消歧 / 重述 → ask_user 回灌重识别
@@ -443,16 +457,12 @@ class Agent:
         if plan.blocked:
             return self._block_high_risk(plan)
 
-        # ④ 中风险确认
-        if plan.risk_level == "mid" and not self._confirm_mid_risk(plan):
-            return "已取消本次操作。"
-
-        # ⑤ 记忆查询短路：直查库，不调 LLM
+        # ④ 记忆查询短路：直查库，不调 LLM
         if plan.primary_intent == IntentNames.MEMORY_QUERY:
             return self._answer_memory_query()
 
-        # ⑥ ReAct 循环（记忆写入回合结束时落库，标志防双写）
-        question = plan.processed or user_input
+        # ⑤ ReAct 循环（记忆写入回合结束时落库，标志防双写）
+        question = plan.text or user_input
         context = self._recall(question)
         self.memory.append(
             Message(
@@ -539,20 +549,27 @@ if __name__ == "__main__":
             )
             print(f"意图: {[i.name for i in plan.intents]}")
             print(
-                f"来源: {plan.source} | 置信度: {[i.confidence for i in plan.intents]}"
+                f"层级: {plan.source_layer} | 置信度: {[i.confidence for i in plan.intents]}"
             )
             print(
-                f"风险: {plan.risk_level} | 歧义: {plan.ambiguous} | 拦截: {plan.blocked}"
+                f"拦截: {plan.blocked} | 缺槽: {plan.need_ask_slots} | 消歧: {plan.need_disambiguate} | 无意图: {plan.no_valid_intent}"
             )
-            print(f"槽位: {plan.slots}")
-            print(
-                f"任务分组: {[(g.intent_ids, g.dependency) for g in plan.task_groups]}"
-            )
+            slots = {
+                item.name: {e.intent: e.value for e in item.entities}
+                for item in plan.intents
+            }
+            print(f"槽位: {slots}")
+            ranking = [
+                (r.intent_name, r.score, r.reason)
+                for r in getattr(plan, "intent_ranking", []) or []
+            ]
+            print(f"意图排序: {ranking}")
             print(f"追问: {plan.ask_prompt}")
-            print(f"净化后: {plan.processed}")
+            print(f"净化后: {plan.text}")
             continue
         try:
             answer = agent.run(question)
-            print(f"Agent: {answer}")
+            if not agent._stream_last_printed:
+                print(f"Agent: {answer}")
         except Exception as e:
             print(f"Agent 错误: {e}")

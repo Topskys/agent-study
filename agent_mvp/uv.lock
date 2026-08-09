@@ -11,7 +11,7 @@ name = "agent-mvp"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "intent-recognizer" },
+    { name = "intent-funnel" },
     { name = "llm-client" },
     { name = "memory-system", extra = ["real"] },
     { name = "python-dotenv" },
@@ -26,7 +26,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "intent-recognizer", editable = "../intent" },
+    { name = "intent-funnel", editable = "../intent" },
     { name = "llm-client", editable = "../llm" },
     { name = "memory-system", extras = ["real"], editable = "../memory" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
@@ -376,7 +376,7 @@ wheels = [
 ]
 
 [[package]]
-name = "intent-recognizer"
+name = "intent-funnel"
 version = "0.1.0"
 source = { editable = "../intent" }
 dependencies = [

@@ -13,11 +13,15 @@ MessageRole = Literal["system", "user", "assistant", "tool"]
 
 
 class ToolCall(BaseModel):
-    """一次工具调用：模型决定调用哪个工具、传什么参数。"""
+    """一次工具调用：模型决定调用哪个工具、传什么参数。
+
+    流式场景下同一调用会按 index 分片增量到达，聚合方按 index 归并。
+    """
 
     id: str = ""
     name: str
     arguments: str = "{}"  # 原始 JSON 字符串（保留原样，解析由工具层负责）
+    index: int = 0  # 流式分片序号；非流式默认为 0
 
 
 class Message(BaseModel):

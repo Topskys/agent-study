@@ -1,6 +1,6 @@
 """配置管理：resources/config.json 加载。
 
-V4 方案：
+V3 方案：
 - intents：意图定义（名称/描述/优先级/必填可选槽位/关键词/别名）
 - thresholds：semantic_high（语义层 0.9）/ llm_high（0.9）/ llm_low（0.6）
 - high_risk_keywords：高危词，命中直接拦截（不进语义与 LLM）
