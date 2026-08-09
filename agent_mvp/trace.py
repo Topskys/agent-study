@@ -94,7 +94,7 @@ class TraceRecorder:
         self,
         *,
         enable: bool = False,
-        log_dir: str | os.Path = "data/trace",
+        log_dir: str | os.PathLike = "data/trace",
         max_bytes: int = 10 * 1024 * 1024,
         backup_count: int = 5,
     ):
@@ -103,7 +103,7 @@ class TraceRecorder:
         self.backup_count = int(backup_count)
         self._writer = (
             JsonlRotatingWriter(
-                self._resolve_dir(log_dir) / "trace.jsonl",
+                self._resolve(log_dir) / "trace.jsonl",
                 max_bytes=self.max_bytes,
                 backup_count=self.backup_count,
             )
@@ -112,16 +112,17 @@ class TraceRecorder:
         )
         self._turns_written = 0
 
+    def close(self):
+        if self._writer is not None:
+            self._writer.close()
+
     @staticmethod
-    def _resolve(log_dir: str | os.Path) -> Path:
-        """日志目录：相对路径相对 agent_mvp 包根解析，含 data/ 前缀则在其下建 trace/。"""
+    def _resolve(log_dir: str | os.PathLike) -> Path:
+        """日志目录：绝对路径直接用，相对路径相对 agent_mvp 包根解析。"""
         p = Path(log_dir)
         if p.is_absolute():
             return p
-        base = Path(__file__).resolve().parent
-        if log_dir.startswith("data/"):
-            return base / p
-        return base
+        return Path(__file__).resolve().parent / p
 
     def enabled(self) -> bool:
         return self.enable and self._writer is not None
@@ -212,4 +213,5 @@ class TraceRecorder:
             stage=stage,
             answer=_clip(answer, limit=8000),
             duration_ms=round(duration_ms, 1) if duration_ms is not None else None,
+            rounds=rounds,
         )

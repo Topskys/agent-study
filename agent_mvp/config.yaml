@@ -39,3 +39,10 @@ tools:
 
 safety:
   high_risk_keywords: ["删除", "删掉", "删", "清空", "清除", "全部", "批量", "群发", "外发", "永久", "注销"]
+
+# Agent 运行轨迹：事件按 JSONL 落盘，单文件满 max_bytes 轮转，只保留 backup_count 个
+trace:
+  enable: true
+  log_dir: data/trace
+  max_bytes: 10485760   # 10MB
+  backup_count: 5

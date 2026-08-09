@@ -38,6 +38,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 
@@ -61,11 +62,11 @@ from memory_system.core.memory_system import MemorySystem
 from tools import (
     TOOLS,
     run_tool,
-    set_bing_search_key,
     set_memory_persist_hook,
     set_openweather_key,
     set_tavily_search_key,
 )
+from trace import TraceRecorder
 
 # 系统级意图常量（与 resources/intent_config.json 的意图名对齐）
 class IntentNames:
@@ -131,15 +132,23 @@ class Agent:
         self.user_memory.start_session(self.session_id)
         self._persisted_this_turn = False
         set_memory_persist_hook(self._remember_long_term)
-        set_bing_search_key(cfg.get("tools", {}).get("bing_search_api_key", ""))
         set_tavily_search_key(cfg.get("tools", {}).get("tavily_api_key", ""))
         set_openweather_key(cfg.get("tools", {}).get("openweather_api_key", ""))
+
+        # ---------- 运行轨迹记录（trace） ----------
+        tr = cfg.get("trace", {})
+        self.tracer = TraceRecorder(
+            enable=bool(tr.get("enable", False)),
+            log_dir=tr.get("log_dir", "data/trace"),
+            max_bytes=int(tr.get("max_bytes", 10 * 1024 * 1024)),
+            backup_count=int(tr.get("backup_count", 5)),
+        )
 
         # ---------- 意图识别（intent-funnel 三层漏斗） ----------
         intent_cfg = cfg.get("intent", {})
         safety_cfg = cfg.get("safety", {})
         self.confirm_timeout = int(intent_cfg.get("confirm_timeout", 30))
-        self.highrisk_timeout = int(intent_cfg.get("highrisk_timeout", 60))
+        self.high_risk_timeout = int(intent_cfg.get("high_risk_timeout", 60))
         funnel_cfg_path = cfg.get("intent", {}).get("config_path") or str(
             Path(__file__).resolve().parent / "resources" / "intent_config.json"
         )
@@ -186,6 +195,40 @@ class Agent:
             return input("> ")
         except (EOFError, KeyboardInterrupt):
             return None
+
+    _RESULTS_SUMMARY_PROMPT = (
+        "你是信息整理助手。下面是联网搜索的原始结果，请整理成简洁的中文摘要，"
+        "要求：\n"
+        "1. 只保留与事实直接相关、值得引用的要点，去除广告、无关与重复内容；\n"
+        "2. 尽量保留关键数据、时间、数字；\n"
+        "3. 在合适的要点末尾附上来源网址（如有）；\n"
+        "4. 如果结果与用户问题完全无关，直接回答\"无相关信息\"。\n"
+        "原始结果：\n{result}"
+    )
+
+    def _summarize_tool_result(self, name: str, result: str) -> str:
+        """对联网搜索等长文本结果做 LLM 二次总结/过滤；其余工具原样返回。
+
+        只对搜索引擎结果摘要（tavily_search 等）且结果显著过长时启用，
+        控制在上下文里的 token 占用并去噪声；失败时回退原文，保证结果可用。
+        """
+        if name != "tavily_search" or len(result) < 500:
+            return result
+        try:
+            resp = self.client.chat(
+                LLMRequest.from_prompt(
+                    self._RESULTS_SUMMARY_PROMPT.format(result=result),
+                    task="tool_summary",
+                    temperature=0,
+                    max_tokens=1500,
+                )
+            )
+            summary = (resp.content or "").strip()
+            if summary:
+                return summary
+        except Exception as e:
+            print(f"  [tool] 摘要失败(回退原文): {e}")
+        return result
 
     # ---------- 记忆：召回与记录 ----------
 
@@ -282,6 +325,7 @@ class Agent:
                     break
                 no_intent_asked = True
             reply = self.ask_user(plan.ask_prompt, float(self.confirm_timeout))
+            self.tracer.ask_user(plan.ask_prompt, reply)
             if not reply or not reply.strip():
                 break
             # 把用户补充/确认里的城市等实体并入当前输入的重新识别，
@@ -388,45 +432,63 @@ class Agent:
             max_tokens=self.max_tokens,
             timeout=self.timeout,
         )
-        if not self.stream:
-            resp = self.client.chat(req)
-            if resp.content:
-                print(f"Agent: {resp.content}")
-                self._stream_last_printed = True
+        t0 = time.perf_counter()
+        try:
+            if not self.stream:
+                resp = self.client.chat(req)
+                if resp.content:
+                    print(f"Agent: {resp.content}")
+                    self._stream_last_printed = True
+            else:
+                content_parts: list[str] = []
+                calls: dict[int, ToolCall] = {}
+                finish_reason = None
+                content_printed = False
+                for chunk in self.client.chat_stream(req):
+                    if chunk.content:
+                        if not content_printed:
+                            print("Agent: ", end="", flush=True)
+                            content_printed = True
+                        content_parts.append(chunk.content)
+                        print(chunk.content, end="", flush=True)
+                    if chunk.tool_calls:
+                        for tc in chunk.tool_calls:
+                            cur = calls.get(tc.index)
+                            if cur is None:
+                                calls[tc.index] = tc
+                            else:
+                                cur.id = cur.id or tc.id
+                                cur.name = (cur.name or "") + (tc.name or "")
+                                cur.arguments = (cur.arguments or "") + (tc.arguments or "")
+                    if chunk.finish_reason:
+                        finish_reason = chunk.finish_reason
+                if content_printed:
+                    print()  # 流式输出结束补换行
+                tool_calls = [calls[i] for i in sorted(calls)] or None
+                self._stream_last_printed = content_printed
+                resp = LLMResponse(
+                    content="".join(content_parts) or None,
+                    tool_calls=tool_calls,
+                    finish_reason=finish_reason,
+                    model=self.model or "",
+                )
+            self.tracer.llm(
+                phase="reason",
+                model=resp.model or self.model or "",
+                content=resp.content,
+                tool_calls=resp.tool_calls,
+                finish_reason=resp.finish_reason,
+                latency_ms=(time.perf_counter() - t0) * 1000,
+            )
             return resp
-
-        content_parts: list[str] = []
-        calls: dict[int, ToolCall] = {}
-        finish_reason = None
-        content_printed = False
-        for chunk in self.client.chat_stream(req):
-            if chunk.content:
-                if not content_printed:
-                    print("Agent: ", end="", flush=True)
-                    content_printed = True
-                content_parts.append(chunk.content)
-                print(chunk.content, end="", flush=True)
-            if chunk.tool_calls:
-                for tc in chunk.tool_calls:
-                    cur = calls.get(tc.index)
-                    if cur is None:
-                        calls[tc.index] = tc
-                    else:
-                        cur.id = cur.id or tc.id
-                        cur.name = (cur.name or "") + (tc.name or "")
-                        cur.arguments = (cur.arguments or "") + (tc.arguments or "")
-            if chunk.finish_reason:
-                finish_reason = chunk.finish_reason
-        if content_printed:
-            print()  # 流式输出结束补换行
-        tool_calls = [calls[i] for i in sorted(calls)] or None
-        self._stream_last_printed = content_printed
-        return LLMResponse(
-            content="".join(content_parts) or None,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            model=self.model or "",
-        )
+        except Exception as e:
+            self.tracer.llm(
+                phase="reason",
+                model=self.model or "",
+                error=str(e),
+                latency_ms=(time.perf_counter() - t0) * 1000,
+            )
+            raise
 
     def act(self, call: ToolCall) -> str:
         """Act：执行一个工具调用，返回观察结果。"""
@@ -434,7 +496,15 @@ class Agent:
             args = json.loads(call.arguments or "{}")
         except json.JSONDecodeError:
             args = {}
+        t0 = time.perf_counter()
         result = run_tool(call.name, args)
+        self.tracer.tool(
+            name=call.name,
+            args=args,
+            result=result,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+        )
+        result = self._summarize_tool_result(call.name, result)
         try:
             print(f"  [tool] {call.name}({json.dumps(args, ensure_ascii=False)}) -> {result}")
         except UnicodeEncodeError:
@@ -459,12 +529,16 @@ class Agent:
         self._turn_inputs.append(user_input)
         self._persisted_this_turn = False
         self._stream_last_printed = False
+        self._turn_index = getattr(self, "_turn_index", 0) + 1
+        t0 = time.perf_counter()
+        self.tracer.turn_start(self.session_id, self._turn_index, user_input)
 
         # ① 意图识别（三层漏斗：规则 → 语义 → LLM + 主动交互分支）
         history = self._recent_user_history()[:-1]
         plan = self.recognizer.recognize(
             user_input, history, self.user_id, self.session_id
         )
+        self.tracer.intent(plan)
         print(
             f"  [intent] primary={plan.primary_intent} src={plan.source_layer} "
             f"blocked={plan.blocked} ask_slots={plan.need_ask_slots} "
@@ -476,11 +550,21 @@ class Agent:
 
         # ③ 高风险拦截
         if plan.blocked:
-            return self._block_high_risk(plan)
+            return self._end_turn(
+                stage="blocked",
+                answer=self._block_high_risk(plan),
+                t0=t0,
+                rounds=0,
+            )
 
         # ④ 记忆查询短路：直查库，不调 LLM
         if plan.primary_intent == IntentNames.MEMORY_QUERY:
-            return self._answer_memory_query()
+            return self._end_turn(
+                stage="memory_query",
+                answer=self._answer_memory_query(),
+                t0=t0,
+                rounds=0,
+            )
 
         # ⑤ ReAct 循环（记忆写入回合结束时落库，标志防双写）
         question = plan.text or user_input
@@ -493,7 +577,7 @@ class Agent:
         )
         max_rounds = max_rounds or self.max_rounds
 
-        for _ in range(max_rounds):
+        for rounds in range(1, max_rounds + 1):
             resp = self.reason()
             self.memory.append(
                 Message(
@@ -511,7 +595,9 @@ class Agent:
                     and not self._persisted_this_turn
                 ):
                     self._persist(user_input)
-                return answer
+                return self._end_turn(
+                    stage="answered", answer=answer, t0=t0, rounds=rounds
+                )
 
             for call in resp.tool_calls:
                 result = self.act(call)
@@ -523,7 +609,25 @@ class Agent:
             and not self._persisted_this_turn
         ):
             self._persist(user_input)
-        return "达到最大迭代轮数，未获得最终答案"
+        return self._end_turn(
+            stage="max_rounds",
+            answer="达到最大迭代轮数，未获得最终答案",
+            t0=t0,
+            rounds=self.max_rounds,
+        )
+
+    def _end_turn(self, *, stage: str, answer: str, t0: float, rounds: int) -> str:
+        """回合收尾：记录 turn_end 轨迹事件后返回最终答案。"""
+        try:
+            self.tracer.turn_end(
+                stage=stage,
+                answer=answer,
+                rounds=rounds,
+                duration_ms=(time.perf_counter() - t0) * 1000,
+            )
+        except Exception:
+            pass
+        return answer
 
 
 def run_agent(question: str, max_rounds: int = 10) -> str:

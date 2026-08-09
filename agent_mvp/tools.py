@@ -24,12 +24,10 @@ from toolbox import (
     get_weather,
     read_file,
     remember,
-    set_bing_search_key,
     set_memory_persist_hook,
     set_openweather_key,
     set_tavily_search_key,
     tavily_search,
-    web_search,
 )
 
 _SCHEMA_PATH = Path(__file__).resolve().parent / "tool_schemas.json"
@@ -42,7 +40,6 @@ TOOL_FUNC_MAP = {
     "get_time": get_time,
     "read_file": read_file,
     "remember": remember,
-    "web_search": web_search,
     "tavily_search": tavily_search,
     "get_location": get_location,
     "get_weather": get_weather,
@@ -51,7 +48,6 @@ TOOL_FUNC_MAP = {
 __all__ = [
     "TOOLS",
     "TOOL_FUNC_MAP",
-    "set_bing_search_key",
     "set_memory_persist_hook",
     "set_openweather_key",
     "set_tavily_search_key",

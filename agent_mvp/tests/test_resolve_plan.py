@@ -34,6 +34,7 @@ def _agent(recognize_raises=False):
         session_id="s",
         recognizer=rec,
         ask_user=lambda p, t: "是",
+        tracer=SimpleNamespace(ask_user=lambda *a, **k: None),
     )
 
 

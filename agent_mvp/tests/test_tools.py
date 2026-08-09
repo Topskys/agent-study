@@ -4,30 +4,49 @@ import tools
 from toolbox import search as tb_search
 
 
-def test_web_search_registered_in_schema():
-    names = [t["function"]["name"] for t in tools.TOOLS]
-    assert "web_search" in names
-    assert "web_search" in tools.TOOL_FUNC_MAP
+def test_web_search_disabled_in_schema():
+    """web_search（Bing）已禁用：不在 schema 与分发表中，联网搜索统一走 tavily。"""
+    import tools as _tools
+
+    with open("tool_schemas.json", encoding="utf-8") as f:
+        from json import load as _load
+
+        schemas = _load(f)
+    names = [t["function"]["name"] for t in schemas]
+    assert "web_search" not in names
+    assert "web_search" not in _tools.TOOL_FUNC_MAP
+    assert "tavily_search" in names
+
+
+def test_disabled_web_search_returns_unknown_tool():
+    """被禁用的 web_search 走分发会被当作未知工具拒绝。"""
+    assert "未知工具" in tools.run_tool("web_search", {"query": "测试"})
 
 
 def test_web_search_without_key_returns_hint(monkeypatch):
     monkeypatch.setattr(tb_search, "_bing_search_api_key", "")
     result = tools.run_tool("web_search", {"query": "测试"})
-    assert "BING_SEARCH_API_KEY" in result
+    assert "未知工具" in result
 
 
 def test_web_search_with_key_skips_missing_key_branch(monkeypatch):
     monkeypatch.setattr(tb_search, "_bing_search_api_key", "fake-key")
     result = tools.run_tool("web_search", {"query": "测试"})
-    assert "未配置 BING_SEARCH_API_KEY" not in result
+    assert "未知工具" in result
 
 
 def test_set_bing_search_key_injects():
-    tools.set_bing_search_key("key-from-config")
+    tb_search.set_bing_search_key("key-from-config")
     assert tb_search._bing_search_api_key == "key-from-config"
-    tools.set_bing_search_key("")  # 空值不覆盖，保留已注入的 key
+    tb_search.set_bing_search_key("")  # 空值不覆盖，保留已注入的 key
     assert tb_search._bing_search_api_key == "key-from-config"
-    tools.set_bing_search_key("")
+    tb_search.set_bing_search_key("")
+
+
+def test_bing_search_impl_still_available(monkeypatch):
+    """实现保留在 toolbox.search：未注入 Key 时返回未配置提示。"""
+    monkeypatch.setattr(tb_search, "_bing_search_api_key", "")
+    assert "BING_SEARCH_API_KEY" in tb_search.web_search("测试")
 
 
 def test_run_tool_unknown():
