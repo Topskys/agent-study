@@ -1,0 +1,39 @@
+# ============================================================
+# intent 备用构建配置：仅构建 intent_recognizer（V2 两阶段 LLM）
+#
+# 切换方式（两包二选一）：
+#   用 intent_funnel   ->  copy pyproject.toml            （当前默认）
+#   用 intent_recognizer -> copy pyproject.recognizer.toml pyproject.toml
+#                          （覆盖后 uv sync 即重装为 intent-recognizer 包）
+#
+# 注意：agent_mvp 目前 import intent_funnel，切换前请同步改
+#       agent_mvp/pyproject.toml 的依赖名与 agent.py 的导入。
+# ============================================================
+
+[project]
+name = "intent-recognizer"
+version = "0.1.0"
+description = "意图识别模块（V2 两阶段 LLM）：多意图识别 + 批量槽位抽取 + 聚合追问 + 并行/串行调度"
+requires-python = ">=3.11"
+dependencies = [
+    "memory-system",
+]
+
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+
+[tool.uv.sources]
+memory-system = { path = "../memory", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["intent_recognizer"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.2",
+]

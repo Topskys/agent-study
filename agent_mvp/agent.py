@@ -36,6 +36,7 @@ ReAct = Reason + Act + Observe 的循环：
 
 import json
 import os
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -57,7 +58,14 @@ from llm_client import (
 
 from config import DEFAULT_CONFIG_PATH, load_config
 from memory_system.core.memory_system import MemorySystem
-from tools import TOOLS, run_tool, set_bing_search_key, set_memory_persist_hook, set_tavily_search_key
+from tools import (
+    TOOLS,
+    run_tool,
+    set_bing_search_key,
+    set_memory_persist_hook,
+    set_openweather_key,
+    set_tavily_search_key,
+)
 
 # 系统级意图常量（与 resources/intent_config.json 的意图名对齐）
 class IntentNames:
@@ -125,6 +133,7 @@ class Agent:
         set_memory_persist_hook(self._remember_long_term)
         set_bing_search_key(cfg.get("tools", {}).get("bing_search_api_key", ""))
         set_tavily_search_key(cfg.get("tools", {}).get("tavily_api_key", ""))
+        set_openweather_key(cfg.get("tools", {}).get("openweather_api_key", ""))
 
         # ---------- 意图识别（intent-funnel 三层漏斗） ----------
         intent_cfg = cfg.get("intent", {})
@@ -263,6 +272,9 @@ class Agent:
             ambiguous = (
                 plan.need_ask_slots or plan.need_disambiguate or plan.no_valid_intent
             )
+            # chat 是通用兜底意图：绝不向用户做"确认执行 chat"式追问/消歧
+            if plan.primary_intent == IntentNames.CHAT:
+                return plan
             if plan.blocked or not (ambiguous and plan.ask_prompt and self.ask_user):
                 break
             if not plan.intents:
@@ -272,6 +284,15 @@ class Agent:
             reply = self.ask_user(plan.ask_prompt, float(self.confirm_timeout))
             if not reply or not reply.strip():
                 break
+            # 把用户补充/确认里的城市等实体并入当前输入的重新识别，
+            # 但简单肯定词（是/对/可以/好的）不重新识别，直接按当前意图推进
+            if re.sub(r"[\s，。）(。~～！!？?]", "", reply.strip().lower()) in {
+                "是", "对", "可以", "行", "好的", "好", "确定", "确认", "执行", "y", "yes", "ok", "嗯", "是的", "对的对的"
+            }:
+                plan.need_disambiguate = False
+                plan.need_ask_slots = False
+                plan.no_valid_intent = False
+                continue
             plan = self.recognizer.recognize(
                 reply.strip(), history, self.user_id, self.session_id
             )
@@ -542,8 +563,12 @@ if __name__ == "__main__":
         if question.strip().lower().startswith("/intent"):
             text = question[len("/intent") :].strip()
             if not text:
-                print("用法: /intent <输入>，查看意图识别结果")
-                continue
+                last = agent._turn_inputs[-1] if agent._turn_inputs else None
+                if not last:
+                    print("用法: /intent <输入>，查看意图识别结果（无参时用上一条用户输入）")
+                    continue
+                text = last
+                print(f"（复用上一条输入: {text}）")
             plan = agent.recognizer.recognize(
                 text, agent._recent_user_history(), agent.user_id, agent.session_id
             )
@@ -560,7 +585,7 @@ if __name__ == "__main__":
             }
             print(f"槽位: {slots}")
             ranking = [
-                (r.intent_name, r.score, r.reason)
+                (r.name, r.confidence)
                 for r in getattr(plan, "intent_ranking", []) or []
             ]
             print(f"意图排序: {ranking}")

@@ -160,7 +160,7 @@ class OpenAIProvider:
                 for tc in delta.tool_calls
             ]
         return Chunk(
-            content=delta.content if delta else "",
+            content=(delta.content if delta else "") or "",
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason if choice else None,
         )

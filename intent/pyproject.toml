@@ -1,7 +1,7 @@
 [project]
 name = "intent-funnel"
 version = "0.1.0"
-description = "意图识别模块（v3 三层漏斗）：规则 → 语义 → LLM 兜底 + 四分支交互 + 会话槽位缓存"
+description = "意图识别模块（V3 三层漏斗）：规则 → 语义 → LLM 兜底 + 四分支交互 + 会话槽位缓存"
 requires-python = ">=3.11"
 dependencies = [
     "memory-system",

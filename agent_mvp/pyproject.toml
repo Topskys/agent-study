@@ -23,4 +23,17 @@ llm-client = { path = "../llm", editable = true }
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.16.2",
+]
+
+[tool.ruff.lint]
+# BLE001: 工具层把"网络/限流/参数异常"统一转成文本返回给模型，属预期兜底
+# I001:   import 顺序交由工具链统一；手动整理反而易反复
+# DTZ005: get_time 返回本地时间（本地会话语义），不强制 UTC
+# TRY004: calculator 用 ValueError 表达"非法语法"，面向模型文本，不换 TypeError
+ignore = [
+    "BLE001",
+    "I001",
+    "DTZ005",
+    "TRY004",
 ]

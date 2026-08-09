@@ -1,7 +1,10 @@
-"""LLM 输出宽松 JSON 解析 + 带超时调用（自包含，无外部依赖）。
+"""LLM 输出宽松 JSON 解析与带超时调用工具。
 
-对齐 V3 ComplexIntentParser：FunctionCall 结果解析失败自动重试 2 次，
-仍失败降级为规则层兜底。
+应对常见不规整输出：markdown 代码块、前后缀文字、尾逗号、单双引号混用。
+统一约定：
+- 阶段一输出意图数组（[...]）；
+- 阶段二输出槽位数组（[...]）；
+- 解析失败返回空结构，交由上层重试 / 规则兜底。
 """
 
 import json
@@ -22,6 +25,7 @@ def _fix_trailing_commas(text: str) -> str:
 
 
 def _extract_json_block(text: str) -> str | None:
+    """提取文本中第一个完整 JSON 块（{...} 或 [...]），跳过字符串内的括号。"""
     text = _strip_code_fence(text)
     in_str = False
     escape = False
@@ -43,10 +47,11 @@ def _extract_json_block(text: str) -> str | None:
             if start == -1:
                 start = i
             stack.append(ch)
-        elif ch in "}]" and stack and stack[-1] == pairs[ch]:
-            stack.pop()
-            if not stack:
-                return text[start : i + 1]
+        elif ch in "}]":
+            if stack and stack[-1] == pairs[ch]:
+                stack.pop()
+                if not stack:
+                    return text[start : i + 1]
     return None
 
 
@@ -59,6 +64,7 @@ def _loads_loose(text: str) -> Any | None:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
+    # 单引号兜底：把字符串内未转义的单引号替换为双引号后再试
     single = re.sub(r"(?<!\\)'(.*?)(?<!\\)'", r'"\1"', cleaned)
     try:
         return json.loads(single)
@@ -66,8 +72,18 @@ def _loads_loose(text: str) -> Any | None:
         return None
 
 
-def parse_intent_json(text: str) -> list[dict[str, Any]]:
-    """解析 ComplexIntentParser 输出（意图数组）。失败返回 []。"""
+def parse_intent_array(text: str) -> list[dict[str, Any]]:
+    """解析阶段一意图数组；解析失败返回 []。"""
+    obj = _loads_loose(text or "")
+    if isinstance(obj, list):
+        return [d for d in obj if isinstance(d, dict)]
+    if isinstance(obj, dict):
+        return [obj] if obj else []
+    return []
+
+
+def parse_slot_results(text: str) -> list[dict[str, Any]]:
+    """解析阶段二槽位数组；解析失败返回 []。"""
     obj = _loads_loose(text or "")
     if isinstance(obj, list):
         return [d for d in obj if isinstance(d, dict)]
@@ -77,7 +93,10 @@ def parse_intent_json(text: str) -> list[dict[str, Any]]:
 
 
 def call_with_timeout(fn, timeout: float = 0, default=None):
-    """带超时调用；timeout<=0 不设超时（由宿主控制）。"""
+    """带超时调用。timeout <= 0 表示不设超时（由宿主控制 LLM 超时）。
+
+    超时返回 default；注意线程无法强制终止，仅作调用侧限时。
+    """
     if not timeout or timeout <= 0:
         return fn()
     from concurrent.futures import ThreadPoolExecutor, TimeoutError

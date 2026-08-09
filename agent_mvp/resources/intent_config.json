@@ -140,9 +140,25 @@
       "slots": []
     },
     {
+      "name": "tool_weather",
+      "desc": "用户查询天气（当前城市或指定城市）",
+      "priority": 8,
+      "keywords": ["天气", "气温", "温度", "下雨", "下雪", "刮风", "湿度", "多少度", "摄氏度", "天气预报"],
+      "required_slots": [],
+      "optional_slots": ["city"],
+      "slots": [
+        {
+          "slot": "city",
+          "slot_desc": "查询天气的城市（可选，缺省为当前位置）",
+          "required": false,
+          "regex": ""
+        }
+      ]
+    },
+    {
       "name": "chat",
       "desc": "通用闲聊/开放域对话",
-      "priority": 8,
+      "priority": 9,
       "keywords": [],
       "required_slots": [],
       "optional_slots": [],
@@ -206,6 +222,16 @@
       "parameters": {
         "type": "object",
         "properties": {}
+      }
+    },
+    {
+      "function": "get_weather",
+      "description": "查询指定城市或当前城市的实时天气",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string", "description": "城市名（可选，留空用 IP 定位当前位置）"}
+        }
       }
     }
   ]
