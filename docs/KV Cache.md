@@ -1,4 +1,4 @@
-﻿# KV Cache（Key-Value Cache，键值缓存）
+# KV Cache（Key-Value Cache，键值缓存）
 
 KV Cache 是大语言模型（LLM）在**自回归推理（文本生成）阶段**最核心的加速技术，本质是**以显存空间换计算时间**。
 
@@ -16,7 +16,7 @@ KV Cache 是大语言模型（LLM）在**自回归推理（文本生成）阶段
 
 - 每生成一个新词，都要把前面所有词重新送入 Transformer 完整前向一次。
 - 但因果掩码（causal mask）保证了：前文每个 Token 的 **Key（K）** 和 **Value（V）** 只由它自己及其前缀决定，**与未来无关、一旦算出永不改变**。重算它们是纯浪费。
-- 复杂度：无缓存时每步对长度 $S$ 的序列做完整前向，注意力项为 $O(S^2 \cdot d)$；整个 $N$ 步生成的总计算量约 $O(N^3 \cdot d)$ 级，生成越来越慢。[\[1\]](#ref-1)
+- 复杂度：无缓存时每步对长度 $S$ 的序列做完整前向，注意力项为 $O(S^2 \cdot d)$；整个 $N$ 步生成的总计算量约 $O(N^3 \cdot d)$ 级，生成越来越慢。[[1]](#ref-1)
 
 ---
 
@@ -75,7 +75,7 @@ $$\text{Memory (Bytes)} = 2 \times L \times S \times H_{kv} \times D \times P \t
 
 > **直观示例：** 13B 模型（40 层，40 个头，头维度 128，FP16），上下文 4096，并发 4：
 > $$2 \times 40 \times 4096 \times 40 \times 128 \times 2 \times 4 = 13.4 \text{ GB}$$
-> 已接近该模型 FP16 权重（约 26 GB）的一半；**并发或上下文再翻一倍，仅缓存就反超全部权重**。这限制了并发量与长上下文支持，也是 decode 阶段几乎总是 memory-bandwidth bound 的根源。[\[1\]](#ref-1)[\[2\]](#ref-2)
+> 已接近该模型 FP16 权重（约 26 GB）的一半；**并发或上下文再翻一倍，仅缓存就反超全部权重**。这限制了并发量与长上下文支持，也是 decode 阶段几乎总是 memory-bandwidth bound 的根源。[[1]](#ref-1)[[2]](#ref-2)
 
 ---
 
@@ -90,11 +90,11 @@ $$\text{Memory (Bytes)} = 2 \times L \times S \times H_{kv} \times D \times P \t
 | **GQA** | Q 头分组共享 K/V（折中） | $H/H_{kv}$× | LLaMA-3 全系、Mistral；LLaMA-2 仅 70B 版采用 |
 | **MLA** | K/V 低秩投影压缩至共享潜空间，按需解压 | 数倍以上 | DeepSeek-V2/V3 |
 
-GQA 论文报告：uptraining 后质量接近 MHA、速度接近 MQA，是当前主流选择。[\[4\]](#ref-4)
+GQA 论文报告：uptraining 后质量接近 MHA、速度接近 MQA，是当前主流选择。[[4]](#ref-4)
 
 ### 2. 系统 / 显存管理优化
 
-- **PagedAttention（vLLM）**：借鉴操作系统虚拟内存分页，将每条序列的 KV Cache 切成固定大小块（block）、经块表映射到非连续物理显存，按需分配。传统方式因碎片化与按最大长度超预留浪费 60%–80% 内存，PagedAttention 将浪费压到 4% 以内，并天然支持块共享（写时复制）。[\[3\]](#ref-3)
+- **PagedAttention（vLLM）**：借鉴操作系统虚拟内存分页，将每条序列的 KV Cache 切成固定大小块（block）、经块表映射到非连续物理显存，按需分配。传统方式因碎片化与按最大长度超预留浪费 60%–80% 内存，PagedAttention 将浪费压到 4% 以内，并天然支持块共享（写时复制）。[[3]](#ref-3)
 - **Prompt Caching / Prefix Caching**：多个请求含相同 System Prompt 或长前缀时，跨请求复用已计算的 KV 块，省去重复 prefill。
 
 ### 3. 量化（Quantization）
